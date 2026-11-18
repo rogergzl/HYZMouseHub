@@ -61,7 +61,7 @@
 
 到 [Releases](https://github.com/rogergzl/HYZMouseHub/releases) 页面下载最新的 `HYZMouseHub.exe`，双击即可运行，免安装、无需管理员权限。
 
-仓库只存放源码，不放编译产物；想自己构建见 `build.cmd`（需要 .NET SDK）。
+想自己构建见 `build.cmd`（需要 .NET SDK）。
 
 ## 使用
 
