@@ -236,8 +236,10 @@ namespace HyzMouseHub
         {
             AppState state = new AppState(AppConfig.Load());
             DeviceService service = new DeviceService(state);
-            Console.WriteLine("每隔 " + gapSeconds + " 秒刷新一次，共 8 次。休眠判定窗口 = "
-                + state.SleepTimeoutMinutes + " 分钟（可在设置里改，输出格式：电量/在线/缓存/详情）。");
+            int allowed = Math.Max(1, (state.SleepTimeoutMinutes * 60) / Math.Max(5, state.RefreshSeconds));
+            Console.WriteLine("每隔 " + gapSeconds + " 秒刷新一次，共 8 次。休眠判定 = "
+                + state.SleepTimeoutMinutes + " 分钟（约 " + allowed + " 个 " + state.RefreshSeconds
+                + " 秒的刷新周期，可在设置里改；输出格式：电量/在线/缓存/详情）。");
             for (int cycle = 0; cycle < 8; cycle++)
             {
                 service.Refresh();

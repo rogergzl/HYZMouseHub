@@ -44,7 +44,7 @@ namespace HyzMouseHub
     {
         public const int SleepTimeoutMin = 1;
         public const int SleepTimeoutMax = 240;
-        public const int SleepTimeoutDefault = 30;
+        public const int SleepTimeoutDefault = 5;
 
         public int DisplayMode = 0; // 0 = 数字, 1 = 鼠标图标
         public int RefreshSeconds = 15;

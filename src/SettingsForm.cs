@@ -348,6 +348,7 @@ namespace HyzMouseHub
                 _appearance.Interval.SelectedIndex = _state.RefreshSeconds == 15 ? 0 : (_state.RefreshSeconds == 30 ? 1 : 2);
                 _appearance.LowThreshold.Value = Clamp(_appearance.LowThreshold, _state.LowThreshold);
                 _appearance.SleepMinutes.Value = Clamp(_appearance.SleepMinutes, _state.SleepTimeoutMinutes);
+                _appearance.RefreshSleepHint();
                 _appearance.AutoStart.Checked = AppConfig.IsAutoStartEnabled();
             }
             finally { _loading = wasLoading; }

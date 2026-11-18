@@ -325,6 +325,7 @@ namespace HyzMouseHub
             Content.Controls.Add(FieldLabel("刷新间隔", 14, 42, 76));
             Interval.DropDownStyle = ComboBoxStyle.DropDownList;
             Interval.Items.AddRange(new object[] { "15 秒", "30 秒", "90 秒" });
+            Interval.SelectedIndex = 0;
             Interval.Location = new Point(92, 38);
             Interval.Size = new Size(120, 26);
             Interval.Font = new Font("Segoe UI", 9.5F);
@@ -349,7 +350,7 @@ namespace HyzMouseHub
             SleepMinutes.Font = new Font("Segoe UI", 9.5F);
             Content.Controls.Add(SleepMinutes);
 
-            _sleepHint.Text = "分钟 · 无响应按刷新周期累计，超时才判休眠";
+            _sleepHint.Text = "分钟";
             _sleepHint.Location = new Point(172, 76);
             _sleepHint.Size = new Size(Content.ClientSize.Width - 186, 22);
             _sleepHint.Font = new Font("Segoe UI", 8.5F);
@@ -374,12 +375,38 @@ namespace HyzMouseHub
 
             _badge.Text = "电量配色：红 ≤15% · 黄 ≤40% · 绿 >40%\r\n" +
                           "数字模式看图标底部色条，图标模式看自下而上的填充\r\n" +
-                          "缓存读数（设备未应答时）整体压淡，超出休眠判定才隐藏电量";
+                          "无应答期间沿用上次电量并整体压淡，超过上面的分钟数才隐藏电量";
             _badge.Location = new Point(14, 186);
             _badge.Size = new Size(Content.ClientSize.Width - 28, 64);
             _badge.Font = new Font("Segoe UI", 8.5F);
             _badge.ForeColor = Color.FromArgb(110, 110, 110);
             Content.Controls.Add(_badge);
+
+            // 分钟是设置项，周期是实现口径：这里把折算结果直接写出来，
+            // 免得看到提示却算不出“到底多久算休眠”。
+            Interval.SelectedIndexChanged += delegate { RefreshSleepHint(); };
+            SleepMinutes.ValueChanged += delegate { RefreshSleepHint(); };
+            RefreshSleepHint();
+        }
+
+        /// <summary>当前下拉框对应的刷新间隔（秒）。</summary>
+        private int SelectedRefreshSeconds
+        {
+            get
+            {
+                int i = Interval.SelectedIndex;
+                return i == 0 ? 15 : (i == 1 ? 30 : 90);
+            }
+        }
+
+        /// <summary>按当前间隔与分钟数刷新提示：分钟 → 连续无响应的刷新周期数。</summary>
+        public void RefreshSleepHint()
+        {
+            if (_sleepHint == null) return;
+            int minutes = (int)SleepMinutes.Value;
+            int gap = SelectedRefreshSeconds;
+            int cycles = Math.Max(1, (minutes * 60) / Math.Max(5, gap));
+            _sleepHint.Text = "分钟 · 约 " + cycles + " 个刷新周期无响应才判休眠";
         }
 
         private void ButtonAt(Button b, string text, int x, int y, int w)
