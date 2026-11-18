@@ -1,0 +1,23 @@
+# 构建产物
+bin/
+obj/
+*.pdb
+*.cache
+
+# 本地工作区与运行日志
+.workbuddy/
+*.log
+error.log
+
+# 自检截图
+*-verify.png
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# 系统
+Thumbs.db
+desktop.ini

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>HyzMouseHub</RootNamespace>
+    <AssemblyName>HYZMouseHub</AssemblyName>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src\Program.cs" />
+    <Compile Include="src\AppIcon.cs" />
+    <Compile Include="src\Hid.cs" />
+    <Compile Include="src\Models.cs" />
+    <Compile Include="src\AtkCodecs.cs" />
+    <Compile Include="src\AtkProvider.cs" />
+    <Compile Include="src\LogitechProvider.cs" />
+    <Compile Include="src\RazerProvider.cs" />
+    <Compile Include="src\LeobogProvider.cs" />
+    <Compile Include="src\EposProvider.cs" />
+    <Compile Include="src\VolumeService.cs" />
+    <Compile Include="src\UiComponents.cs" />
+    <Compile Include="src\Config.cs" />
+    <Compile Include="src\DeviceService.cs" />
+    <Compile Include="src\TrayApp.cs" />
+    <Compile Include="src\SettingsForm.cs" />
+    <Compile Include="src\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
