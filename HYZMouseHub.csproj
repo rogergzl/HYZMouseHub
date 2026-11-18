@@ -26,6 +26,7 @@
     <Compile Include="src\EposProvider.cs" />
     <Compile Include="src\VolumeService.cs" />
     <Compile Include="src\UiComponents.cs" />
+    <Compile Include="src\AppState.cs" />
     <Compile Include="src\Config.cs" />
     <Compile Include="src\DeviceService.cs" />
     <Compile Include="src\TrayApp.cs" />

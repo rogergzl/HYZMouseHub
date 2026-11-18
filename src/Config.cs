@@ -42,9 +42,15 @@ namespace HyzMouseHub
 
     public sealed class AppConfig
     {
+        public const int SleepTimeoutMin = 1;
+        public const int SleepTimeoutMax = 240;
+        public const int SleepTimeoutDefault = 30;
+
         public int DisplayMode = 0; // 0 = 数字, 1 = 鼠标图标
         public int RefreshSeconds = 15;
         public int LowThreshold = 15;
+        // 设备连续无应答多久之后才判定为休眠（分钟）。期间沿用上一次读到的电量。
+        public int SleepTimeoutMinutes = SleepTimeoutDefault;
         public string SelectedDeviceId = "";
         public string ActiveProfile = "";
         // 托盘显示哪些设备：null/"" 表示全部显示；否则为分号分隔的 DeviceInfo.Id 列表。
@@ -110,6 +116,8 @@ namespace HyzMouseHub
             if (int.TryParse(Get(kv, "DisplayMode"), out v)) c.DisplayMode = v == 1 ? 1 : 0;
             if (int.TryParse(Get(kv, "RefreshSeconds"), out v) && v >= 5) c.RefreshSeconds = v;
             if (int.TryParse(Get(kv, "LowThreshold"), out v) && v >= 0 && v <= 100) c.LowThreshold = v;
+            if (int.TryParse(Get(kv, "SleepTimeoutMinutes"), out v) && v >= SleepTimeoutMin && v <= SleepTimeoutMax)
+                c.SleepTimeoutMinutes = v;
             c.SelectedDeviceId = Get(kv, "SelectedDeviceId");
             c.ActiveProfile = Get(kv, "ActiveProfile");
             c.TrayVisibleIds = Get(kv, "TrayVisibleIds");
@@ -158,6 +166,7 @@ namespace HyzMouseHub
             kv["DisplayMode"] = DisplayMode.ToString();
             kv["RefreshSeconds"] = RefreshSeconds.ToString();
             kv["LowThreshold"] = LowThreshold.ToString();
+            kv["SleepTimeoutMinutes"] = SleepTimeoutMinutes.ToString();
             kv["SelectedDeviceId"] = SelectedDeviceId;
             kv["ActiveProfile"] = ActiveProfile;
             kv["TrayVisibleIds"] = TrayVisibleIds;

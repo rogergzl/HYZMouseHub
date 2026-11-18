@@ -214,6 +214,7 @@ namespace HyzMouseHub
         public readonly Button Delete = new Button();
         public readonly Button Add = new Button();
         private readonly Label _emptyHint = new Label();
+        private readonly Label _tip = new Label();
 
         public ProfileCard() : base("配置档位", 236)
         {
@@ -249,13 +250,12 @@ namespace HyzMouseHub
             ButtonAt(Delete, "删除", 130, 152, 108);
             ButtonAt(Add, "新建空白", 246, 152, 122);
 
-            Label tip = new Label();
-            tip.Text = "保存后可在托盘右键菜单里直接切换配置。";
-            tip.Location = new Point(14, 190);
-            tip.Size = new Size(Content.ClientSize.Width - 28, 30);
-            tip.Font = new Font("Segoe UI", 8.5F);
-            tip.ForeColor = Color.FromArgb(135, 135, 135);
-            Content.Controls.Add(tip);
+            _tip.Text = "保存后可在托盘右键里直接切换。";
+            _tip.Location = new Point(14, 190);
+            _tip.Size = new Size(Content.ClientSize.Width - 28, 30);
+            _tip.Font = new Font("Segoe UI", 8.5F);
+            _tip.ForeColor = Color.FromArgb(135, 135, 135);
+            Content.Controls.Add(_tip);
 
             SetEmptyState(true);
         }
@@ -290,6 +290,7 @@ namespace HyzMouseHub
             Profiles.Width = w;
             CurrentDpi.Width = w;
             _emptyHint.Width = w;
+            if (_tip != null) _tip.Width = w;
             Apply.Left = Content.ClientSize.Width - 14 - Apply.Width;
             Save.Left = Apply.Left - Save.Width - 8;
         }
@@ -301,13 +302,15 @@ namespace HyzMouseHub
         public readonly RadioButton IconMode = new RadioButton();
         public readonly ComboBox Interval = new ComboBox();
         public readonly NumericUpDown LowThreshold = new NumericUpDown();
+        public readonly NumericUpDown SleepMinutes = new NumericUpDown();
         public readonly CheckBox AutoStart = new CheckBox();
         public readonly Button Save = new Button();
         public readonly Button Close = new Button();
         private readonly Label _autoHint = new Label();
+        private readonly Label _sleepHint = new Label();
         private readonly Label _badge = new Label();
 
-        public AppearanceCard() : base("外观与运行", 216)
+        public AppearanceCard() : base("外观与运行", 250)
         {
             NumberMode.Text = "百分比数字";
             IconMode.Text = "设备图标进度";
@@ -336,26 +339,44 @@ namespace HyzMouseHub
             LowThreshold.Font = new Font("Segoe UI", 9.5F);
             Content.Controls.Add(LowThreshold);
 
+            Content.Controls.Add(FieldLabel("休眠判定", 14, 76, 76));
+            SleepMinutes.Minimum = AppConfig.SleepTimeoutMin;
+            SleepMinutes.Maximum = AppConfig.SleepTimeoutMax;
+            SleepMinutes.Increment = 5;
+            SleepMinutes.Value = AppConfig.SleepTimeoutDefault;
+            SleepMinutes.Location = new Point(92, 72);
+            SleepMinutes.Size = new Size(72, 26);
+            SleepMinutes.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(SleepMinutes);
+
+            _sleepHint.Text = "分钟 · 无响应按刷新周期累计，超时才判休眠";
+            _sleepHint.Location = new Point(172, 76);
+            _sleepHint.Size = new Size(Content.ClientSize.Width - 186, 22);
+            _sleepHint.Font = new Font("Segoe UI", 8.5F);
+            _sleepHint.ForeColor = Color.FromArgb(125, 125, 125);
+            Content.Controls.Add(_sleepHint);
+
             AutoStart.Text = "开机自动启动";
-            AutoStart.Location = new Point(14, 74);
+            AutoStart.Location = new Point(14, 110);
             AutoStart.Size = new Size(160, 24);
             AutoStart.Font = new Font("Segoe UI", 9.5F);
             Content.Controls.Add(AutoStart);
 
             _autoHint.Text = "仅开机自启时静默进托盘，手动打开仍弹出窗口";
-            _autoHint.Location = new Point(178, 77);
+            _autoHint.Location = new Point(178, 113);
             _autoHint.Size = new Size(Content.ClientSize.Width - 192, 22);
             _autoHint.Font = new Font("Segoe UI", 8.5F);
             _autoHint.ForeColor = Color.FromArgb(125, 125, 125);
             Content.Controls.Add(_autoHint);
 
-            ButtonAt(Save, "保存设置", 14, 106, 120);
-            ButtonAt(Close, "关闭窗口", 142, 106, 120);
+            ButtonAt(Save, "保存设置", 14, 142, 120);
+            ButtonAt(Close, "关闭窗口", 142, 142, 120);
 
-            _badge.Text = "数字模式：底部色条 蓝=鼠标 · 紫=键盘 · 品红=耳机\r\n" +
-                          "图标模式：自下而上填充，红 ≤15% · 橙 ≤40% · 绿 >40%";
-            _badge.Location = new Point(14, 150);
-            _badge.Size = new Size(Content.ClientSize.Width - 28, 52);
+            _badge.Text = "电量配色：红 ≤15% · 黄 ≤40% · 绿 >40%\r\n" +
+                          "数字模式看图标底部色条，图标模式看自下而上的填充\r\n" +
+                          "缓存读数（设备未应答时）整体压淡，超出休眠判定才隐藏电量";
+            _badge.Location = new Point(14, 186);
+            _badge.Size = new Size(Content.ClientSize.Width - 28, 64);
             _badge.Font = new Font("Segoe UI", 8.5F);
             _badge.ForeColor = Color.FromArgb(110, 110, 110);
             Content.Controls.Add(_badge);
@@ -376,9 +397,10 @@ namespace HyzMouseHub
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (Content == null || _autoHint == null || _badge == null) return;
+            if (Content == null || _autoHint == null || _badge == null || _sleepHint == null) return;
             int w = Math.Max(120, Content.ClientSize.Width - 28);
             _autoHint.Width = Math.Max(80, Content.ClientSize.Width - _autoHint.Left - 14);
+            _sleepHint.Width = Math.Max(80, Content.ClientSize.Width - _sleepHint.Left - 14);
             _badge.Width = w;
         }
     }

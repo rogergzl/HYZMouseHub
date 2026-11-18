@@ -62,7 +62,7 @@ namespace HyzMouseHub
         private readonly Form _syncForm;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly DeviceService _service;
-        private readonly AppConfig _config;
+        private readonly AppState _state;
         private readonly Dictionary<string, Icon> _iconCache = new Dictionary<string, Icon>();
         private SettingsForm _settings;
         private bool _refreshing;
@@ -71,10 +71,11 @@ namespace HyzMouseHub
         private bool _startupRefreshPending = true;
         private int _secondsSinceRefresh;
 
-        public TrayApp(DeviceService service, AppConfig config, bool startMinimized)
+        public TrayApp(DeviceService service, AppState state, bool startMinimized)
         {
             _service = service;
-            _config = config;
+            _state = state;
+            _state.Changed += OnStateChanged;
 
             _syncForm = new Form();
             _syncForm.AutoScaleMode = AutoScaleMode.Dpi;
@@ -100,7 +101,34 @@ namespace HyzMouseHub
         }
 
         public DeviceService Service { get { return _service; } }
-        public AppConfig Config { get { return _config; } }
+        public AppState State { get { return _state; } }
+
+        /// <summary>
+        /// 状态中间层广播：任一处界面改了设置，这里统一刷新托盘图标与菜单，
+        /// 设置窗口自己订阅同一事件同步控件，双方不再各持一份副本。
+        /// </summary>
+        private void OnStateChanged(object sender, StateChangedEventArgs e)
+        {
+            UiInvoke(delegate
+            {
+                switch (e.Area)
+                {
+                    case StateArea.Appearance:
+                        _secondsSinceRefresh = 0;
+                        UpdateUi();
+                        break;
+                    case StateArea.TrayDevices:
+                        UpdateUi();
+                        break;
+                    case StateArea.Profiles:
+                        UpdateUi();
+                        break;
+                    default:
+                        UpdateUi();
+                        break;
+                }
+            });
+        }
 
         /// <summary>设置窗口改动勾选后调用，立即重建托盘图标。</summary>
         public void RefreshTrayIcons()
@@ -141,7 +169,7 @@ namespace HyzMouseHub
             }
 
             _secondsSinceRefresh++;
-            if (_secondsSinceRefresh >= Math.Max(5, _config.RefreshSeconds))
+            if (_secondsSinceRefresh >= Math.Max(5, _state.RefreshSeconds))
             {
                 _secondsSinceRefresh = 0;
                 RefreshNow();
@@ -221,7 +249,6 @@ namespace HyzMouseHub
             {
                 entry.DragStartX = Cursor.Position.X;
                 entry.DragMoved += Math.Abs(dx);
-                _config.Save();
                 UpdateUi();
             }
         }
@@ -255,8 +282,8 @@ namespace HyzMouseHub
             string other = order[target];
             order[index] = other;
             order[target] = deviceId;
-            _config.SetTrayOrder(order);
             _orderDirty = true;
+            _state.SetTrayOrder(order);
             return true;
         }
 
@@ -265,11 +292,11 @@ namespace HyzMouseHub
             List<DeviceSnapshot> snapshots = _service.Snapshot();
             List<DeviceSnapshot> visible = new List<DeviceSnapshot>();
             foreach (DeviceSnapshot s in snapshots)
-                if (_config.IsTrayVisible(s.Info.Id)) visible.Add(s);
+                if (_state.IsTrayVisible(s.Info.Id)) visible.Add(s);
             visible.Sort(delegate(DeviceSnapshot a, DeviceSnapshot b)
             {
-                int ia = _config.TrayOrderIndex(a.Info.Id);
-                int ib = _config.TrayOrderIndex(b.Info.Id);
+                int ia = _state.TrayOrderIndex(a.Info.Id);
+                int ib = _state.TrayOrderIndex(b.Info.Id);
                 return ia.CompareTo(ib);
             });
             List<string> ids = new List<string>();
@@ -291,9 +318,9 @@ namespace HyzMouseHub
             });
         }
 
-        public void SaveConfig()
+        /// <summary>外观设置变更后重置刷新计时，让新间隔立即生效。</summary>
+        public void ResetRefreshClock()
         {
-            _config.Save();
             _secondsSinceRefresh = 0;
         }
 
@@ -323,7 +350,6 @@ namespace HyzMouseHub
             int cols = levels.Length;
             int rows = 1 + kinds.Length;
             int stride = cell * zoom + pad;
-            int oldMode = _config.DisplayMode;
             try
             {
                 using (Bitmap sheet = new Bitmap(pad + cols * stride, pad + rows * stride))
@@ -340,9 +366,9 @@ namespace HyzMouseHub
                             sample.Percent = levels[c];
                             sample.Online = levels[c] >= 0;
                             sample.Charging = levels[c] == 47;
-                            _config.DisplayMode = r == 0 ? 0 : 1;
+                            int mode = r == 0 ? 0 : 1;
                             DeviceKind kind = r == 0 ? DeviceKind.Mouse : kinds[r - 1];
-                            using (Icon icon = GetBatteryIcon(sample, kind))
+                            using (Icon icon = GetBatteryIcon(sample, kind, mode))
                             using (Bitmap small = icon.ToBitmap())
                             {
                                 g.DrawImage(small, new Rectangle(pad + c * stride, pad + r * stride, cell * zoom, cell * zoom));
@@ -354,7 +380,6 @@ namespace HyzMouseHub
             }
             finally
             {
-                _config.DisplayMode = oldMode;
                 ExitThread();
             }
         }
@@ -368,10 +393,10 @@ namespace HyzMouseHub
             List<DeviceSnapshot> snapshots = _service.Snapshot();
             List<DeviceSnapshot> visible = new List<DeviceSnapshot>();
             foreach (DeviceSnapshot s in snapshots)
-                if (_config.IsTrayVisible(s.Info.Id)) visible.Add(s);
+                if (_state.IsTrayVisible(s.Info.Id)) visible.Add(s);
             visible.Sort(delegate(DeviceSnapshot a, DeviceSnapshot b)
             {
-                return _config.TrayOrderIndex(a.Info.Id).CompareTo(_config.TrayOrderIndex(b.Info.Id));
+                return _state.TrayOrderIndex(a.Info.Id).CompareTo(_state.TrayOrderIndex(b.Info.Id));
             });
 
             // 顺序变化后 Windows 托盘按 NotifyIcon 创建顺序排列，必须整体重建才能生效。
@@ -408,7 +433,7 @@ namespace HyzMouseHub
             foreach (DeviceSnapshot s in visible)
             {
                 TrayEntry e = EnsureTray(s.Info.Id);
-                Icon icon = GetBatteryIcon(s.Battery, s.Info.Kind);
+                Icon icon = GetBatteryIcon(s.Battery, s.Info.Kind, _state.DisplayMode);
                 if (e.CurrentIcon != icon)
                 {
                     e.CurrentIcon = icon;
@@ -434,7 +459,7 @@ namespace HyzMouseHub
         private void CheckLowBattery(TrayEntry entry, DeviceSnapshot s)
         {
             BatteryReading b = s.Battery;
-            if (b.Percent >= 0 && b.Percent <= _config.LowThreshold && !b.Charging)
+            if (!b.Cached && b.Percent >= 0 && b.Percent <= _state.LowThreshold && !b.Charging)
             {
                 if (entry.LastLowPercent != b.Percent)
                 {
@@ -447,7 +472,7 @@ namespace HyzMouseHub
                     catch { }
                 }
             }
-            else if (b.Percent > _config.LowThreshold + 5)
+            else if (b.Percent > _state.LowThreshold + 5)
             {
                 entry.LastLowPercent = -1;
             }
@@ -533,8 +558,8 @@ namespace HyzMouseHub
             }
             foreach (DeviceSnapshot s in snapshots)
             {
-                string shown = _config.IsTrayVisible(s.Info.Id) ? "" : "  [隐藏]";
-                string mark = s.Battery.Online ? "" : "  [休眠]";
+                string shown = _state.IsTrayVisible(s.Info.Id) ? "" : "  [隐藏]";
+                string mark = s.Battery.Online ? "" : (s.Battery.Cached ? "  [休眠 · 缓存]" : "  [休眠]");
                 ToolStripItem item = menu.Items.Add("  " + TypeMark(s.Info.Kind) + " " + s.Info.ShortName + "  " + s.Battery.StatusText + mark + shown);
                 item.Enabled = false;
             }
@@ -542,9 +567,9 @@ namespace HyzMouseHub
 
             ToolStripMenuItem display = new ToolStripMenuItem("托盘显示");
             ToolStripMenuItem number = new ToolStripMenuItem("百分比数字", null, delegate { SetDisplayMode(0); });
-            number.Checked = _config.DisplayMode == 0;
+            number.Checked = _state.DisplayMode == 0;
             ToolStripMenuItem mouse = new ToolStripMenuItem("设备图标进度", null, delegate { SetDisplayMode(1); });
-            mouse.Checked = _config.DisplayMode == 1;
+            mouse.Checked = _state.DisplayMode == 1;
             display.DropDownItems.Add(number);
             display.DropDownItems.Add(mouse);
             menu.Items.Add(display);
@@ -555,24 +580,22 @@ namespace HyzMouseHub
                 int captured = seconds;
                 ToolStripMenuItem choice = new ToolStripMenuItem(seconds + " 秒", null, delegate
                 {
-                    _config.RefreshSeconds = captured;
-                    SaveConfig();
-                    UpdateUi();
+                    _state.SetRefreshSeconds(captured);
                 });
-                choice.Checked = _config.RefreshSeconds == seconds;
+                choice.Checked = _state.RefreshSeconds == seconds;
                 interval.DropDownItems.Add(choice);
             }
             menu.Items.Add(interval);
 
             ToolStripMenuItem profiles = new ToolStripMenuItem("板载配置");
-            foreach (MouseProfile p in _config.Profiles)
+            foreach (MouseProfile p in _state.Profiles)
             {
                 MouseProfile captured = p;
                 ToolStripMenuItem pi = new ToolStripMenuItem(p.Name + "  " + p.DpiX + "×" + p.DpiY);
                 pi.Click += delegate { ApplyProfile(captured, deviceId); };
                 profiles.DropDownItems.Add(pi);
             }
-            if (_config.Profiles.Count > 0) profiles.DropDownItems.Add(new ToolStripSeparator());
+            if (_state.Profiles.Count > 0) profiles.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem manage = new ToolStripMenuItem("管理 / 新建配置...");
             manage.Click += delegate { OpenSettings(); };
             profiles.DropDownItems.Add(manage);
@@ -607,17 +630,15 @@ namespace HyzMouseHub
             return "[鼠标]";
         }
 
+        /// <summary>显示方式只写状态中间层，托盘与设置窗口都从那里同步。</summary>
         private void SetDisplayMode(int mode)
         {
-            if (_config.DisplayMode == mode) return;
-            _config.DisplayMode = mode;
-            SaveConfig();
-            UpdateUi();
+            _state.SetDisplayMode(mode);
         }
 
         public void ApplyProfile(MouseProfile profile)
         {
-            ApplyProfile(profile, _config.SelectedDeviceId);
+            ApplyProfile(profile, _state.SelectedDeviceId);
         }
 
         private void ApplyProfile(MouseProfile profile, string deviceId)
@@ -637,9 +658,9 @@ namespace HyzMouseHub
                 return;
             }
 
-            _config.SelectedDeviceId = deviceId;
-            _config.ActiveProfile = profile.Name;
-            SaveConfig();
+            _state.SetSelectedDevice(deviceId);
+            _state.SetActiveProfile(profile.Name);
+            _secondsSinceRefresh = 0;
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -684,11 +705,14 @@ namespace HyzMouseHub
             ExitThread();
         }
 
-        private Icon GetBatteryIcon(BatteryReading battery, DeviceKind kind)
+        private Icon GetBatteryIcon(BatteryReading battery, DeviceKind kind, int displayMode)
         {
             int level = battery.Percent;
             bool charging = battery.Charging;
-            bool offline = level < 0 || !battery.Online;
+            // 缓存读数（设备未应答但在保留窗口内）仍然画出数值，只是整体压淡，
+            // 这样既能继续看到电量，又和实时读数一眼可分。
+            bool offline = level < 0;
+            bool stale = battery.Cached;
 
             // Tray icons are 16px at 100% (20/24/32px at higher scaling). Drawing at
             // the native small-icon size keeps the digits sharp; downscaling one
@@ -702,7 +726,7 @@ namespace HyzMouseHub
             catch { }
 
             string key = size + "|" + (offline ? "off" : level.ToString()) + "|" +
-                         (charging ? "c" : "") + "|" + _config.DisplayMode + "|" + (int)kind;
+                         (charging ? "c" : "") + (stale ? "s" : "") + "|" + displayMode + "|" + (int)kind;
             Icon cached;
             if (_iconCache.TryGetValue(key, out cached)) return cached;
 
@@ -716,10 +740,17 @@ namespace HyzMouseHub
 
                 float scale = size / 16f;
                 g.ScaleTransform(scale, scale);
-                if (_config.DisplayMode == 1)
+                if (displayMode == 1)
                     DrawDeviceGlyph(g, offline ? -1 : level, charging, offline, kind);
                 else
-                    DrawNumberGlyph(g, offline ? -1 : level, charging, scale, kind);
+                    DrawNumberGlyph(g, offline ? -1 : level, charging, scale);
+
+                if (stale)
+                {
+                    g.ResetTransform();
+                    using (SolidBrush fade = new SolidBrush(Color.FromArgb(112, 255, 255, 255)))
+                        g.FillRectangle(fade, 0, 0, size, size);
+                }
 
                 IntPtr h = bmp.GetHicon();
                 Icon icon = (Icon)Icon.FromHandle(h).Clone();
@@ -729,7 +760,7 @@ namespace HyzMouseHub
             }
         }
 
-        private static void DrawNumberGlyph(Graphics g, int level, bool charging, float scale, DeviceKind kind)
+        private static void DrawNumberGlyph(Graphics g, int level, bool charging, float scale)
         {
             // 纯数字：透明背景，直接绘制黑色粗体百分比，不画底色块。
             string text = level < 0 ? "--" : (level > 99 ? "100" : level.ToString());
@@ -749,11 +780,12 @@ namespace HyzMouseHub
                 g.DrawString(text, font, brush, new RectangleF(0.2f * scale, 0.4f * scale, 15.6f * scale, 13.4f * scale), sf);
             }
 
-            // 设备类型改用底部 1px 色条区分：右上角小角标在 16px 下只是噪点，还会压住数字。
+            // 底部色条用醒目字体提示电量档位（红 ≤15% / 黄 ≤40% / 绿 >40%），
+            // 1px 的类型色在 16px 下几乎看不见，改为 2px 高、更宽的档位色条。
             g.ResetTransform();
             g.ScaleTransform(scale, scale);
-            using (SolidBrush bar = new SolidBrush(KindColor(kind)))
-                g.FillRectangle(bar, 2.2f, 14.4f, 11.6f, 1.2f);
+            using (SolidBrush bar = new SolidBrush(StatusColor(level, level < 0)))
+                g.FillRectangle(bar, 1.8f, 13.7f, 12.4f, 2.1f);
 
             if (charging)
             {
@@ -763,14 +795,6 @@ namespace HyzMouseHub
             }
         }
 
-        /// <summary>设备类型色：蓝=鼠标，紫=键盘，品红=耳机，与电量红/橙/绿不冲突。</summary>
-        private static Color KindColor(DeviceKind kind)
-        {
-            if (kind == DeviceKind.Keyboard) return Color.FromArgb(0x7B, 0x5C, 0xD6);
-            if (kind == DeviceKind.Headset) return Color.FromArgb(0xC2, 0x47, 0x7E);
-            return Color.FromArgb(0x2B, 0x6C, 0xB0);
-        }
-
         private static void DrawDeviceGlyph(Graphics g, int level, bool charging, bool offline, DeviceKind kind)
         {
             if (kind == DeviceKind.Keyboard) DrawKeyboardGlyph(g, level, charging, offline);
@@ -778,12 +802,13 @@ namespace HyzMouseHub
             else DrawMouseGlyph(g, level, charging, offline);
         }
 
+        /// <summary>电量档位色：红 ≤15%、黄 ≤40%、绿 >40%；无读数用中性灰。</summary>
         private static Color StatusColor(int level, bool offline)
         {
             if (offline || level < 0) return Color.FromArgb(0x8A, 0x90, 0x96);
-            if (level <= 15) return Color.FromArgb(0xFF, 0x46, 0x46);
-            if (level <= 40) return Color.FromArgb(0xFF, 0xBE, 0x3C);
-            return Color.FromArgb(0x19, 0xC6, 0x9B);
+            if (level <= 15) return Color.FromArgb(0xE2, 0x3A, 0x3A);
+            if (level <= 40) return Color.FromArgb(0xF2, 0xB7, 0x0C);
+            return Color.FromArgb(0x2E, 0xA5, 0x5F);
         }
 
         private static void DrawMouseGlyph(Graphics g, int level, bool charging, bool offline)

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace HyzMouseHub
@@ -48,6 +49,13 @@ namespace HyzMouseHub
                     PrintDeviceTest(first == "--test-all");
                     return 0;
                 }
+                if (first == "--watch" || first.StartsWith("--watch="))
+                {
+                    int gap = 3;
+                    if (first.Length > 8) int.TryParse(first.Substring(8), out gap);
+                    PrintWatch(gap < 1 ? 1 : gap);
+                    return 0;
+                }
                 if (first.StartsWith("--dpi="))
                 {
                     return SetDpiFromArgs(first.Substring(6));
@@ -74,8 +82,10 @@ namespace HyzMouseHub
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(true);
-            DeviceService service = new DeviceService();
+            // 启动顺序即依赖方向：配置 → 状态中间层 → 设备服务 → 界面。
             AppConfig config = AppConfig.Load();
+            AppState state = new AppState(config);
+            DeviceService service = new DeviceService(state);
 
             bool autostart = false;
             string snapshotPath = null;
@@ -101,7 +111,7 @@ namespace HyzMouseHub
 
             if (!string.IsNullOrEmpty(iconPreviewPath))
             {
-                TrayApp preview = new TrayApp(service, config, true);
+                TrayApp preview = new TrayApp(service, state, true);
                 System.Windows.Forms.Timer pt = new System.Windows.Forms.Timer();
                 pt.Interval = 600;
                 pt.Tick += delegate
@@ -122,7 +132,7 @@ namespace HyzMouseHub
 
             if (!string.IsNullOrEmpty(snapshotPath))
             {
-                TrayApp snap = new TrayApp(service, config, true);
+                TrayApp snap = new TrayApp(service, state, true);
                 System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
                 t.Interval = 900;
                 t.Tick += delegate
@@ -141,7 +151,7 @@ namespace HyzMouseHub
                 return 0;
             }
 
-            Application.Run(new TrayApp(service, config, autostart));
+            Application.Run(new TrayApp(service, state, autostart));
             return 0;
         }
 
@@ -174,6 +184,7 @@ namespace HyzMouseHub
             Console.WriteLine("--list          列出全部 HID 接口");
             Console.WriteLine("--test          扫描 ATK / 雷蛇设备并读取电量");
             Console.WriteLine("--test-all      同时读取 DPI（会唤醒设备）");
+            Console.WriteLine("--watch[=秒]    连续刷新 8 次，观察休眠保留窗口（默认间隔 3 秒）");
             Console.WriteLine("--dpi=ID,X,Y,STAGE  写入 DPI，例如 --dpi=RAZER:1532:00C1,1600,1600,1");
             Console.WriteLine("--probe=VID:PID  导出指定 HID 接口的特征/输入报告（协议适配用）");
             Console.WriteLine("--make-icon=路径  生成多尺寸程序图标 .ico");
@@ -196,7 +207,7 @@ namespace HyzMouseHub
 
         private static void PrintDeviceTest(bool includeDpi)
         {
-            DeviceService service = new DeviceService();
+            DeviceService service = new DeviceService(new AppState(AppConfig.Load()));
             service.Refresh();
             List<DeviceSnapshot> snapshots = service.Snapshot();
             if (snapshots.Count == 0)
@@ -215,6 +226,34 @@ namespace HyzMouseHub
                     DpiReading d = service.ReadDpi(s.Info);
                     Console.WriteLine("  DPI : {0}  传感器: {1}", d.Text, string.IsNullOrEmpty(s.Info.Sensor) ? s.Info.DpiNote : s.Info.Sensor);
                 }
+            }
+        }
+
+        /// <summary>
+        /// 诊断用：连续刷新几次并打印每次状态，用来确认“设备无应答后仍沿用上次读数”的保留窗口是否生效。
+        /// </summary>
+        private static void PrintWatch(int gapSeconds)
+        {
+            AppState state = new AppState(AppConfig.Load());
+            DeviceService service = new DeviceService(state);
+            Console.WriteLine("每隔 " + gapSeconds + " 秒刷新一次，共 8 次。休眠判定窗口 = "
+                + state.SleepTimeoutMinutes + " 分钟（可在设置里改，输出格式：电量/在线/缓存/详情）。");
+            for (int cycle = 0; cycle < 8; cycle++)
+            {
+                service.Refresh();
+                Console.WriteLine("--- 第 " + (cycle + 1) + " 次 " + DateTime.Now.ToString("HH:mm:ss") + " ---");
+                List<DeviceSnapshot> snapshots = service.Snapshot();
+                if (snapshots.Count == 0) Console.WriteLine("  未检测到设备");
+                foreach (DeviceSnapshot s in snapshots)
+                {
+                    Console.WriteLine("  {0}  电量 {1}  在线 {2}  缓存 {3}  {4}",
+                        s.Info.ShortName,
+                        s.Battery.Percent < 0 ? "--" : s.Battery.Percent + "%",
+                        s.Battery.Online, s.Battery.Cached, s.Battery.StatusText);
+                    if (!string.IsNullOrEmpty(s.Battery.Detail)) Console.WriteLine("    详情: " + s.Battery.Detail);
+                    if (!string.IsNullOrEmpty(s.Battery.Error)) Console.WriteLine("    错误: " + s.Battery.Error);
+                }
+                if (cycle < 7) Thread.Sleep(gapSeconds * 1000);
             }
         }
 
@@ -288,7 +327,7 @@ namespace HyzMouseHub
             if (parts.Length >= 4) int.TryParse(parts[3], out stage);
             if (stage < 1) stage = 1;
 
-            DeviceService service = new DeviceService();
+            DeviceService service = new DeviceService(new AppState(AppConfig.Load()));
             service.Refresh();
             DeviceSnapshot target = null;
             foreach (DeviceSnapshot s in service.Snapshot())

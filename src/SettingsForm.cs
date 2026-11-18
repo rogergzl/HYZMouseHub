@@ -10,7 +10,7 @@ namespace HyzMouseHub
     {
         private readonly TrayApp _app;
         private readonly DeviceService _service;
-        private readonly AppConfig _config;
+        private readonly AppState _state;
 
         private readonly DeviceCard _device = new DeviceCard();
         private readonly TrayDevicesCard _trayDevices = new TrayDevicesCard();
@@ -28,7 +28,7 @@ namespace HyzMouseHub
         {
             _app = app;
             _service = app.Service;
-            _config = app.Config;
+            _state = app.State;
 
             Text = "HYZ Mouse Hub";
             Icon = AppIcon.Shared;
@@ -46,8 +46,37 @@ namespace HyzMouseHub
 
             BuildUi();
             WireEvents();
+            // 状态中间层是唯一权威来源：任何一处改了设置，这里同步控件，
+            // 不再依赖构造时读到的旧值。
+            _state.Changed += OnStateChanged;
             LoadSettingsUi();
             RefreshDevices();
+        }
+
+        private void OnStateChanged(object sender, StateChangedEventArgs e)
+        {
+            if (IsDisposed) return;
+            if (e.Area == StateArea.Appearance)
+            {
+                UiInvoke(SyncAppearanceControls);
+            }
+            else if (e.Area == StateArea.Profiles)
+            {
+                UiInvoke(delegate
+                {
+                    if (_loading) return;
+                    bool wasLoading = _loading;
+                    _loading = true;
+                    try { ReloadProfiles(); }
+                    finally { _loading = wasLoading; }
+                });
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _state.Changed -= OnStateChanged;
+            base.Dispose(disposing);
         }
 
         private void BuildUi()
@@ -168,11 +197,11 @@ namespace HyzMouseHub
             foreach (Control c in left.Controls) ResetCardHeight(c);
             foreach (Control c in right.Controls) ResetCardHeight(c);
 
-            int lb = ContentBottom(left);
-            int rb = ContentBottom(right);
+            // 用高度累加而不是 c.Bottom：FlowLayoutPanel 的重新排布是延迟的，
+            // 刚改完高度时 Bottom 还是上一轮的值，按它算会得出错误的差值。
+            int lb = StackHeight(left);
+            int rb = StackHeight(right);
             if (lb <= 0 || rb <= 0) return;
-            // 内容超出可视区域时交给滚动，不做拉伸，避免卡片被压扁。
-            if (lb > left.ClientSize.Height || rb > right.ClientSize.Height) return;
             if (lb == rb) return;
 
             FlowLayoutPanel shorter = lb < rb ? left : right;
@@ -187,12 +216,13 @@ namespace HyzMouseHub
             if (card != null && card.Height != card.NaturalHeight) card.Height = card.NaturalHeight;
         }
 
-        private static int ContentBottom(FlowLayoutPanel panel)
+        /// <summary>列内卡片按顺序堆叠后的总高度（含外边距），与实际渲染顺序一致。</summary>
+        private static int StackHeight(FlowLayoutPanel panel)
         {
-            int bottom = 0;
+            int height = panel.Padding.Top;
             foreach (Control c in panel.Controls)
-                if (c.Visible && c.Bottom > bottom) bottom = c.Bottom;
-            return bottom;
+                if (c.Visible) height += c.Height + c.Margin.Vertical;
+            return height + panel.Padding.Bottom;
         }
 
         private static Card LastCard(FlowLayoutPanel panel)
@@ -209,6 +239,8 @@ namespace HyzMouseHub
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            // 窗口可能是在托盘菜单改过设置之后才被打开，这里再对齐一次控件。
+            SyncAppearanceControls();
             // 布局稳定后把窗口底部多余空白收掉，让卡片紧贴状态栏。
             FitHeightToContent();
         }
@@ -220,7 +252,7 @@ namespace HyzMouseHub
             if (left == null || right == null || _body == null) return;
             if (_body.VerticalScroll.Visible) return; // 内容已经超出，交给滚动
 
-            int cardsBottom = Math.Max(ContentBottom(left), ContentBottom(right));
+            int cardsBottom = Math.Max(StackHeight(left), StackHeight(right));
             if (cardsBottom <= 0) return;
 
             // 末尾 6px 是卡片下边距 + 滚动条余量，避免收缩后反而出现滚动条。
@@ -294,14 +326,36 @@ namespace HyzMouseHub
         private void LoadSettingsUi()
         {
             _loading = true;
-            _appearance.NumberMode.Checked = _config.DisplayMode == 0;
-            _appearance.IconMode.Checked = _config.DisplayMode == 1;
-            _appearance.Interval.SelectedIndex = _config.RefreshSeconds == 15 ? 0 : (_config.RefreshSeconds == 30 ? 1 : 2);
-            _appearance.LowThreshold.Value = _config.LowThreshold;
-            _appearance.AutoStart.Checked = AppConfig.IsAutoStartEnabled();
-            ReloadProfiles();
-            LoadVolumeEndpoints();
-            _loading = false;
+            try
+            {
+                SyncAppearanceControls();
+                ReloadProfiles();
+                LoadVolumeEndpoints();
+            }
+            finally { _loading = false; }
+        }
+
+        /// <summary>把外观设置控件重新对齐到中间层状态（不写回，只读取）。</summary>
+        private void SyncAppearanceControls()
+        {
+            if (IsDisposed) return;
+            bool wasLoading = _loading;
+            _loading = true;
+            try
+            {
+                _appearance.NumberMode.Checked = _state.DisplayMode == 0;
+                _appearance.IconMode.Checked = _state.DisplayMode == 1;
+                _appearance.Interval.SelectedIndex = _state.RefreshSeconds == 15 ? 0 : (_state.RefreshSeconds == 30 ? 1 : 2);
+                _appearance.LowThreshold.Value = Clamp(_appearance.LowThreshold, _state.LowThreshold);
+                _appearance.SleepMinutes.Value = Clamp(_appearance.SleepMinutes, _state.SleepTimeoutMinutes);
+                _appearance.AutoStart.Checked = AppConfig.IsAutoStartEnabled();
+            }
+            finally { _loading = wasLoading; }
+        }
+
+        private static decimal Clamp(NumericUpDown box, int value)
+        {
+            return Math.Min(box.Maximum, Math.Max(box.Minimum, value));
         }
 
         private void LoadVolumeEndpoints()
@@ -322,14 +376,15 @@ namespace HyzMouseHub
         private void ReloadProfiles()
         {
             _profiles.Profiles.Items.Clear();
-            foreach (MouseProfile p in _config.Profiles) _profiles.Profiles.Items.Add(p);
+            foreach (MouseProfile p in _state.Profiles) _profiles.Profiles.Items.Add(p);
             int pick = -1;
-            if (!string.IsNullOrEmpty(_config.ActiveProfile))
+            string active = _state.ActiveProfile;
+            if (!string.IsNullOrEmpty(active))
             {
                 for (int i = 0; i < _profiles.Profiles.Items.Count; i++)
                 {
                     MouseProfile p = _profiles.Profiles.Items[i] as MouseProfile;
-                    if (p != null && p.Name == _config.ActiveProfile) { pick = i; break; }
+                    if (p != null && p.Name == active) { pick = i; break; }
                 }
             }
             // 没有“当前配置”时默认选中第一条，避免名称框一片空白。
@@ -356,7 +411,7 @@ namespace HyzMouseHub
         public void RefreshDevices()
         {
             if (IsDisposed) return;
-            string selected = _config.SelectedDeviceId;
+            string selected = _state.SelectedDeviceId;
             bool wasLoading = _loading;
             _loading = true;
             try
@@ -366,7 +421,7 @@ namespace HyzMouseHub
                 foreach (DeviceSnapshot s in _service.Snapshot())
                 {
                     _device.DeviceList.Items.Add(new DeviceItem(s.Info, s.Battery.StatusText));
-                    _trayDevices.DeviceList.Items.Add(new TrayDeviceItem(s.Info), _config.IsTrayVisible(s.Info.Id));
+                    _trayDevices.DeviceList.Items.Add(new TrayDeviceItem(s.Info), _state.IsTrayVisible(s.Info.Id));
                 }
                 int selectIndex = 0;
                 for (int i = 0; i < _device.DeviceList.Items.Count; i++)
@@ -396,9 +451,8 @@ namespace HyzMouseHub
                     if (item != null) { ids.Add(item.Device.Id); checkedCount++; }
                 }
             }
-            _config.TrayVisibleIds = (checkedCount == _trayDevices.DeviceList.Items.Count || _trayDevices.DeviceList.Items.Count == 0)
-                ? "" : string.Join(";", ids.ToArray());
-            _config.Save();
+            _state.SetTrayVisibleIds((checkedCount == _trayDevices.DeviceList.Items.Count || _trayDevices.DeviceList.Items.Count == 0)
+                ? "" : string.Join(";", ids.ToArray()));
             _app.RefreshTrayIcons();
         }
 
@@ -406,8 +460,7 @@ namespace HyzMouseHub
         {
             DeviceItem item = _device.DeviceList.SelectedItem as DeviceItem;
             if (item == null) return;
-            _config.SelectedDeviceId = item.Device.Id;
-            _config.Save();
+            _state.SetSelectedDevice(item.Device.Id);
             UpdateDeviceLabels();
             ReadDpi();
         }
@@ -500,7 +553,7 @@ namespace HyzMouseHub
             string name = _profiles.NameBox.Text.Trim();
             // 未填名称时用当前板载 DPI 命名，避免因空名无法保存。
             if (string.IsNullOrEmpty(name)) name = _dpi.X.Value + " DPI";
-            MouseProfile p = _config.FindProfile(name);
+            MouseProfile p = _state.FindProfile(name);
             bool isNew = p == null;
             if (p == null) p = new MouseProfile();
             p.Name = name;
@@ -509,9 +562,8 @@ namespace HyzMouseHub
             p.Stage = (int)_dpi.Stage.Value;
             DeviceInfo d = SelectedDevice();
             p.DeviceId = d == null ? "" : d.Id;
-            if (isNew) _config.Profiles.Add(p);
-            _config.ActiveProfile = p.Name;
-            _config.Save();
+            if (isNew) _state.Profiles.Add(p);
+            _state.ProfilesChanged(p.Name);
             ReloadProfiles();
             SetStatus(isNew ? "已新建配置 " + name : "已更新配置 " + name);
         }
@@ -534,8 +586,7 @@ namespace HyzMouseHub
             string name = _profiles.NameBox.Text.Trim();
             if (string.IsNullOrEmpty(name)) { SetStatus("请输入新名称"); return; }
             p.Name = name;
-            _config.ActiveProfile = name;
-            _config.Save();
+            _state.ProfilesChanged(name);
             ReloadProfiles();
             SetStatus("已重命名");
         }
@@ -544,8 +595,8 @@ namespace HyzMouseHub
         {
             MouseProfile p = _profiles.Profiles.SelectedItem as MouseProfile;
             if (p == null) { SetStatus("请先选择配置"); return; }
-            _config.Profiles.Remove(p);
-            _config.Save();
+            _state.Profiles.Remove(p);
+            _state.ProfilesChanged(null);
             ReloadProfiles();
             SetStatus("已删除配置");
         }
@@ -553,12 +604,12 @@ namespace HyzMouseHub
         private void AddProfile()
         {
             MouseProfile p = new MouseProfile();
-            p.Name = "新配置 " + (_config.Profiles.Count + 1);
+            p.Name = "新配置 " + (_state.Profiles.Count + 1);
             p.DpiX = (int)_dpi.X.Value;
             p.DpiY = (int)_dpi.Y.Value;
             p.Stage = (int)_dpi.Stage.Value;
-            _config.Profiles.Add(p);
-            _config.Save();
+            _state.Profiles.Add(p);
+            _state.ProfilesChanged(null);
             ReloadProfiles();
             _profiles.NameBox.Text = p.Name;
             SetStatus("已新建配置");
@@ -566,10 +617,12 @@ namespace HyzMouseHub
 
         private void SaveSettings()
         {
-            _config.DisplayMode = _appearance.IconMode.Checked ? 1 : 0;
-            _config.RefreshSeconds = _appearance.Interval.SelectedIndex == 0 ? 15 : (_appearance.Interval.SelectedIndex == 1 ? 30 : 90);
-            _config.LowThreshold = (int)_appearance.LowThreshold.Value;
-            _app.SaveConfig();
+            _state.ApplyAppearance(
+                _appearance.IconMode.Checked ? 1 : 0,
+                _appearance.Interval.SelectedIndex == 0 ? 15 : (_appearance.Interval.SelectedIndex == 1 ? 30 : 90),
+                (int)_appearance.LowThreshold.Value,
+                (int)_appearance.SleepMinutes.Value);
+            _app.ResetRefreshClock();
             AppConfig.SetAutoStart(_appearance.AutoStart.Checked);
             SetStatus("设置已保存");
         }

@@ -68,6 +68,10 @@ namespace HyzMouseHub
         public int Millivolts;
         public string Detail = "";
         public string Error = "";
+        // 设备本次没有应答（休眠 / 超时），但仍在保留窗口内：
+        // Percent 等字段沿用上一次成功读数，Cached 标记其为缓存值，界面必须区别于实时值。
+        public bool Cached;
+        public DateTime CachedAt = DateTime.MinValue;
         // 电池健康度说明：本程序支持的外设 HID 协议均不上报 SoH/循环次数，
         // 这里只展示硬件真实提供的信息（如 ATK 电压），不伪造健康百分比。
         public string HealthText = "";
@@ -78,7 +82,9 @@ namespace HyzMouseHub
             get
             {
                 if (Percent < 0) return Online ? "--" : (Sleeping ? "休眠" : "--");
-                return Percent + "%" + (Charging ? " 充电中" : "");
+                string text = Percent + "%" + (Charging ? " 充电中" : "");
+                if (Cached) text += " · 上次读数";
+                return text;
             }
         }
 
