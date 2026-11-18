@@ -59,6 +59,12 @@
 | EPOS / 森海塞尔 GSA 70 | 支持 | 视型号 | 不适用 | 不适用 | 不适用 |
 | 罗技 HID++ | 支持 | 支持 | 支持 | 支持 | 支持（不再维护） |
 
+## 下载
+
+到 [Releases](https://github.com/rogergzl/HYZMouseHub/releases) 页面下载最新的 `HYZMouseHub.exe`，双击即可运行，免安装、无需管理员权限。
+
+仓库只存放源码，不放编译产物；想自己构建见 `build.cmd`（需要 .NET SDK）。
+
 ## 使用
 
 1. 双击 `HYZMouseHub.exe`，弹出主界面，托盘出现设备电量图标。
