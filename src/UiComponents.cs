@@ -109,9 +109,13 @@ namespace HyzMouseHub
     internal sealed class TrayDevicesCard : Card
     {
         public readonly CheckedListBox DeviceList = new CheckedListBox();
+        public readonly ComboBox ThresholdDevice = new ComboBox();
+        public readonly NumericUpDown Threshold = new NumericUpDown();
+        public readonly CheckBox UseGlobal = new CheckBox();
         private readonly Label _hint = new Label();
+        private readonly Label _percent = new Label();
 
-        public TrayDevicesCard() : base("托盘显示设备", 138)
+        public TrayDevicesCard() : base("托盘显示设备", 172)
         {
             DeviceList.Location = new Point(14, 8);
             DeviceList.Size = new Size(Content.ClientSize.Width - 28, 76);
@@ -120,9 +124,38 @@ namespace HyzMouseHub
             DeviceList.Font = new Font("Segoe UI", 9.5F);
             Content.Controls.Add(DeviceList);
 
+            Content.Controls.Add(FieldLabel("单设备阈值", 14, 96, 76));
+            ThresholdDevice.DropDownStyle = ComboBoxStyle.DropDownList;
+            ThresholdDevice.Location = new Point(96, 92);
+            ThresholdDevice.Size = new Size(150, 26);
+            // 设备名常带品牌+型号，下拉框本体窄，展开宽度单独放宽，避免只看到前半截。
+            ThresholdDevice.DropDownWidth = 320;
+            ThresholdDevice.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(ThresholdDevice);
+
+            Threshold.Minimum = 0;
+            Threshold.Maximum = 100;
+            Threshold.Location = new Point(257, 92);
+            Threshold.Size = new Size(58, 26);
+            Threshold.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(Threshold);
+
+            _percent.Text = "%";
+            _percent.Location = new Point(321, 96);
+            _percent.Size = new Size(16, 20);
+            _percent.Font = new Font("Segoe UI", 9.5F);
+            _percent.ForeColor = Color.FromArgb(90, 90, 90);
+            Content.Controls.Add(_percent);
+
+            UseGlobal.Text = "跟随全局";
+            UseGlobal.Location = new Point(349, 95);
+            UseGlobal.Size = new Size(88, 24);
+            UseGlobal.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(UseGlobal);
+
             _hint.Text = "勾选即显示独立图标 · 全选=显示所有设备（含新插入）\r\n拖动托盘图标可调整左右顺序；Win11 可能折叠到 ^ 中。";
-            _hint.Location = new Point(14, 88);
-            _hint.Size = new Size(Content.ClientSize.Width - 28, 42);
+            _hint.Location = new Point(14, 126);
+            _hint.Size = new Size(Content.ClientSize.Width - 28, 34);
             _hint.Font = new Font("Segoe UI", 8.5F);
             _hint.ForeColor = Color.FromArgb(125, 125, 125);
             Content.Controls.Add(_hint);
@@ -131,10 +164,17 @@ namespace HyzMouseHub
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (DeviceList == null || _hint == null) return;
+            if (DeviceList == null || _hint == null || ThresholdDevice == null || UseGlobal == null || _percent == null || Threshold == null) return;
             int w = Math.Max(120, Content.ClientSize.Width - 28);
             DeviceList.Width = w;
             _hint.Width = w;
+
+            // 右侧三个控件贴右对齐，阈值下拉吃掉剩余宽度：卡片变窄时先压下拉，不挤掉百分号与勾选框。
+            int right = Content.ClientSize.Width - 14;
+            UseGlobal.Left = right - UseGlobal.Width;
+            _percent.Left = UseGlobal.Left - 12 - _percent.Width;
+            Threshold.Left = _percent.Left - 6 - Threshold.Width;
+            ThresholdDevice.Width = Math.Max(90, Math.Min(240, Threshold.Left - 10 - ThresholdDevice.Left));
         }
     }
 
@@ -304,13 +344,15 @@ namespace HyzMouseHub
         public readonly NumericUpDown LowThreshold = new NumericUpDown();
         public readonly NumericUpDown SleepMinutes = new NumericUpDown();
         public readonly CheckBox AutoStart = new CheckBox();
+        public readonly CheckBox ChargeFullAlert = new CheckBox();
+        public readonly CheckBox DisconnectAlert = new CheckBox();
         public readonly Button Save = new Button();
         public readonly Button Close = new Button();
         private readonly Label _autoHint = new Label();
         private readonly Label _sleepHint = new Label();
         private readonly Label _badge = new Label();
 
-        public AppearanceCard() : base("外观与运行", 250)
+        public AppearanceCard() : base("外观与运行", 282)
         {
             NumberMode.Text = "百分比数字";
             IconMode.Text = "设备图标进度";
@@ -373,10 +415,22 @@ namespace HyzMouseHub
             ButtonAt(Save, "保存设置", 14, 142, 120);
             ButtonAt(Close, "关闭窗口", 142, 142, 120);
 
+            ChargeFullAlert.Text = "充满提醒";
+            ChargeFullAlert.Location = new Point(14, 180);
+            ChargeFullAlert.Size = new Size(180, 24);
+            ChargeFullAlert.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(ChargeFullAlert);
+
+            DisconnectAlert.Text = "设备断开提醒";
+            DisconnectAlert.Location = new Point(200, 180);
+            DisconnectAlert.Size = new Size(180, 24);
+            DisconnectAlert.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(DisconnectAlert);
+
             _badge.Text = "电量配色：红 ≤15% · 黄 ≤40% · 绿 >40%\r\n" +
                           "数字模式看图标底部色条，图标模式看自下而上的填充\r\n" +
                           "无应答期间沿用上次电量并整体压淡，超过上面的分钟数才隐藏电量";
-            _badge.Location = new Point(14, 186);
+            _badge.Location = new Point(14, 210);
             _badge.Size = new Size(Content.ClientSize.Width - 28, 64);
             _badge.Font = new Font("Segoe UI", 8.5F);
             _badge.ForeColor = Color.FromArgb(110, 110, 110);
@@ -486,9 +540,45 @@ namespace HyzMouseHub
         }
     }
 
+    internal sealed class DiagnosticsCard : Card
+    {
+        public readonly TextBox Errors = new TextBox();
+        public readonly Button OpenLog = new Button();
+
+        public DiagnosticsCard() : base("读取诊断", 136)
+        {
+            Errors.Multiline = true;
+            Errors.ReadOnly = true;
+            Errors.ScrollBars = ScrollBars.Vertical;
+            Errors.Location = new Point(14, 8);
+            Errors.Size = new Size(Content.ClientSize.Width - 28, 88);
+            Errors.Font = new Font("Consolas", 8.5F);
+            Errors.Text = "暂无读取失败记录。";
+            Content.Controls.Add(Errors);
+
+            OpenLog.Text = "打开日志目录";
+            OpenLog.Location = new Point(14, 102);
+            OpenLog.Size = new Size(120, 26);
+            OpenLog.FlatStyle = FlatStyle.Flat;
+            OpenLog.FlatAppearance.BorderColor = Color.FromArgb(0xC8, 0xD4, 0xDE);
+            OpenLog.BackColor = Color.White;
+            OpenLog.Font = new Font("Segoe UI", 9.5F);
+            Content.Controls.Add(OpenLog);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (Errors == null || Content == null) return;
+            Errors.Width = Math.Max(120, Content.ClientSize.Width - 28);
+        }
+    }
+
     internal sealed class SafetyCard : Card
     {
-        public SafetyCard() : base("安全说明 / 电池健康", 100)
+        public readonly Label VersionInfo = new Label();
+
+        public SafetyCard() : base("安全说明 / 电池健康", 126)
         {
             Label text = new Label();
             text.Text =
@@ -501,6 +591,14 @@ namespace HyzMouseHub
             text.Font = new Font("Segoe UI", 8.5F);
             text.ForeColor = Color.FromArgb(85, 85, 85);
             Content.Controls.Add(text);
+
+            VersionInfo.Text = "版本 " + typeof(Program).Assembly.GetName().Version.ToString(3)
+                + " · 开源项目：github.com/rogergzl/HYZMouseHub";
+            VersionInfo.Location = new Point(14, 100);
+            VersionInfo.Size = new Size(Content.ClientSize.Width - 28, 22);
+            VersionInfo.Font = new Font("Segoe UI", 8.5F);
+            VersionInfo.ForeColor = Color.FromArgb(120, 120, 120);
+            Content.Controls.Add(VersionInfo);
         }
 
         protected override void OnResize(EventArgs e)

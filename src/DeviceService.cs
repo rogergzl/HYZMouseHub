@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using System.Threading;
 
 namespace HyzMouseHub
@@ -24,11 +26,18 @@ namespace HyzMouseHub
             public int MissedCycles;
         }
 
+        private const int MaxRecentErrors = 40;
+        private const long MaxLogBytes = 64 * 1024;
+
         private readonly List<IDeviceProvider> _providers = new List<IDeviceProvider>();
         private readonly object _snapshotLock = new object();
         private readonly object _refreshLock = new object();
+        private readonly object _errorLock = new object();
         private readonly Dictionary<string, HeldReading> _held =
             new Dictionary<string, HeldReading>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> _recentErrors = new List<string>();
+        private readonly Dictionary<string, string> _lastError =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly AppState _state;
         private List<DeviceSnapshot> _snapshots = new List<DeviceSnapshot>();
 
@@ -50,36 +59,168 @@ namespace HyzMouseHub
             }
         }
 
+        /// <summary>最近的设备读取错误（新→旧），供设置界面显示；不抛异常。</summary>
+        public List<string> RecentErrors()
+        {
+            lock (_errorLock)
+            {
+                List<string> result = new List<string>(_recentErrors);
+                result.Reverse();
+                return result;
+            }
+        }
+
+        /// <summary>相同错误连续出现时只记一条，恢复后再次失败才重新记录。</summary>
+        private void RecordError(string key, string deviceName, string message)
+        {
+            if (string.IsNullOrEmpty(message)) return;
+            string clean = message.Trim();
+            if (clean.Length == 0) return;
+            lock (_errorLock)
+            {
+                string previous;
+                if (_lastError.TryGetValue(key, out previous) && previous == clean) return;
+                _lastError[key] = clean;
+
+                string line = DateTime.Now.ToString("HH:mm:ss") + "  " + deviceName + "：" + clean;
+                _recentErrors.Add(line);
+                while (_recentErrors.Count > MaxRecentErrors) _recentErrors.RemoveAt(0);
+                try
+                {
+                    string path = AppConfig.ReadErrorLogPath;
+                    FileInfo fi = new FileInfo(path);
+                    if (fi.Exists && fi.Length > MaxLogBytes)
+                    {
+                        string[] lines = File.ReadAllLines(path);
+                        int start = Math.Max(0, lines.Length - 200);
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = start; i < lines.Length; i++) sb.AppendLine(lines[i]);
+                        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+                    }
+                    File.AppendAllText(path, line + Environment.NewLine, new UTF8Encoding(false));
+                }
+                catch { }
+            }
+        }
+
+        private void ClearError(string key)
+        {
+            lock (_errorLock)
+            {
+                if (_lastError.ContainsKey(key)) _lastError.Remove(key);
+            }
+        }
+
         public void Refresh()
         {
             lock (_refreshLock)
             {
                 List<HidDeviceDescriptor> catalog;
                 try { catalog = HidNative.Enumerate(); }
-                catch { catalog = new List<HidDeviceDescriptor>(); }
+                catch (Exception ex)
+                {
+                    RecordError("HID枚举", "HID 枚举", ex.Message);
+                    catalog = new List<HidDeviceDescriptor>();
+                }
 
+                // 按物理设备拆分目录：同一接收器的多个 HID 接口仍在一个子集里，
+                // 但两个同款接收器不会被 Provider 内部的 VID:PID 去重合并掉。
+                Dictionary<string, List<HidDeviceDescriptor>> groups = PartitionByPhysicalDevice(catalog);
                 List<DeviceSnapshot> next = new List<DeviceSnapshot>();
                 foreach (IDeviceProvider provider in _providers)
                 {
-                    List<DeviceInfo> devices;
-                    try { devices = provider.Discover(catalog); }
-                    catch { continue; }
-
-                    foreach (DeviceInfo device in devices)
+                    List<DeviceSnapshot> found = new List<DeviceSnapshot>();
+                    foreach (KeyValuePair<string, List<HidDeviceDescriptor>> group in groups)
                     {
-                        DeviceSnapshot s = new DeviceSnapshot();
-                        s.Info = device;
-                        try { s.Battery = provider.ReadBattery(device); }
+                        List<DeviceInfo> devices;
+                        try { devices = provider.Discover(group.Value); }
                         catch (Exception ex)
                         {
-                            s.Battery.Error = ex.Message;
+                            RecordError("发现:" + provider.Name, provider.Name, ex.Message);
+                            continue;
                         }
-                        ApplyHoldOver(s);
-                        next.Add(s);
+
+                        foreach (DeviceInfo device in devices)
+                        {
+                            DeviceSnapshot s = new DeviceSnapshot();
+                            s.Info = device;
+                            try { s.Battery = provider.ReadBattery(device); }
+                            catch (Exception ex)
+                            {
+                                s.Battery.Error = ex.Message;
+                            }
+                            if (string.IsNullOrEmpty(s.Battery.Error) && s.Battery.Percent >= 0)
+                                ClearError(device.Id);
+                            else if (!string.IsNullOrEmpty(s.Battery.Error))
+                                RecordError(device.Id, device.ShortName, s.Battery.Error);
+                            ApplyHoldOver(s);
+                            found.Add(s);
+                        }
                     }
+                    DisambiguateIds(found, provider);
+                    next.AddRange(found);
                 }
                 lock (_snapshotLock) { _snapshots = next; }
             }
+        }
+
+        /// <summary>
+        /// 同 VID:PID 的多个接收器原本会合并成一个设备。首个保留原 ID 以兼容旧配置，
+        /// 其余用 HID 路径短哈希作后缀，保证各自有独立角标 / 可见性 / 顺序 / 阈值。
+        /// </summary>
+        private static void DisambiguateIds(List<DeviceSnapshot> snapshots, IDeviceProvider provider)
+        {
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            IProviderCacheRekey rekey = provider as IProviderCacheRekey;
+            foreach (DeviceSnapshot s in snapshots)
+            {
+                string id = s.Info.Id;
+                if (seen.Add(id)) continue;
+                string hash = HidNative.ShortHash(s.Info.HidPath);
+                string candidate;
+                int n = 1;
+                do
+                {
+                    candidate = id + "#" + hash + (n > 1 ? "-" + n : "");
+                    n++;
+                }
+                while (!seen.Add(candidate));
+                s.Info.Id = candidate;
+                if (rekey != null) rekey.Rekey(id, candidate);
+            }
+        }
+
+        /// <summary>
+        /// HID 路径形如 \\?\hid#vid_...&pid_...&mi_01#a&1A2B3C&0&0004#{guid}，
+        /// 第二段去掉末尾接口号就是设备实例键：同一硬件的各接口相同，不同接收器不同。
+        /// </summary>
+        private static Dictionary<string, List<HidDeviceDescriptor>> PartitionByPhysicalDevice(
+            List<HidDeviceDescriptor> catalog)
+        {
+            Dictionary<string, List<HidDeviceDescriptor>> groups =
+                new Dictionary<string, List<HidDeviceDescriptor>>(StringComparer.OrdinalIgnoreCase);
+            foreach (HidDeviceDescriptor h in catalog)
+            {
+                string key = PhysicalKey(h.Path);
+                List<HidDeviceDescriptor> list;
+                if (!groups.TryGetValue(key, out list))
+                {
+                    list = new List<HidDeviceDescriptor>();
+                    groups.Add(key, list);
+                }
+                list.Add(h);
+            }
+            return groups;
+        }
+
+        private static string PhysicalKey(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "path:" + HidNative.ShortHash(path);
+            string[] parts = path.Split('#');
+            if (parts.Length < 3) return "path:" + HidNative.ShortHash(path);
+            string instance = parts[2];
+            int last = instance.LastIndexOf('&');
+            return "inst:" + (last > 0 ? instance.Substring(0, last) : instance);
         }
 
         /// <summary>

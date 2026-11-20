@@ -57,7 +57,42 @@ namespace HyzMouseHub
         public string TrayVisibleIds = "";
         // 托盘图标显示顺序（分号分隔的 DeviceInfo.Id）；空串=按设备发现顺序。
         public string TrayOrder = "";
+        // 每设备低电量阈值覆盖：没有覆盖项时用 LowThreshold。
+        public readonly Dictionary<string, int> LowThresholdOverrides =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // 充满提醒 / 设备断开提醒。低电量提醒始终开启，阈值可为 0 关闭。
+        public bool ChargeFullAlert = true;
+        public bool DisconnectAlert = true;
         public List<MouseProfile> Profiles = new List<MouseProfile>();
+
+        /// <summary>最近一次 SetAutoStart 的失败原因，成功为 null。</summary>
+        public static string LastAutoStartError { get; private set; }
+
+        public int EffectiveLowThreshold(string deviceId)
+        {
+            int value;
+            if (!string.IsNullOrEmpty(deviceId) && LowThresholdOverrides.TryGetValue(deviceId, out value))
+                return value;
+            return LowThreshold;
+        }
+
+        /// <summary>设为全局值等同于移除覆盖，避免配置里堆积无意义的重复项。</summary>
+        public void SetLowThresholdOverride(string deviceId, int value)
+        {
+            if (string.IsNullOrEmpty(deviceId)) return;
+            value = Math.Min(100, Math.Max(0, value));
+            if (value == LowThreshold) LowThresholdOverrides.Remove(deviceId);
+            else LowThresholdOverrides[deviceId] = value;
+        }
+
+        /// <summary>全局阈值变化时清掉与新值相同的覆盖项。</summary>
+        public void PruneLowThresholdOverrides()
+        {
+            List<string> stale = new List<string>();
+            foreach (KeyValuePair<string, int> kv in LowThresholdOverrides)
+                if (kv.Value == LowThreshold) stale.Add(kv.Key);
+            foreach (string key in stale) LowThresholdOverrides.Remove(key);
+        }
 
         public bool IsTrayVisible(string deviceId)
         {
@@ -98,6 +133,11 @@ namespace HyzMouseHub
             }
         }
 
+        public static string ReadErrorLogPath
+        {
+            get { return Path.Combine(ConfigDir, "read-errors.log"); }
+        }
+
         private static string SettingsPath
         {
             get { return Path.Combine(ConfigDir, "settings.ini"); }
@@ -118,10 +158,14 @@ namespace HyzMouseHub
             if (int.TryParse(Get(kv, "LowThreshold"), out v) && v >= 0 && v <= 100) c.LowThreshold = v;
             if (int.TryParse(Get(kv, "SleepTimeoutMinutes"), out v) && v >= SleepTimeoutMin && v <= SleepTimeoutMax)
                 c.SleepTimeoutMinutes = v;
+            bool flag;
+            if (bool.TryParse(Get(kv, "ChargeFullAlert"), out flag)) c.ChargeFullAlert = flag;
+            if (bool.TryParse(Get(kv, "DisconnectAlert"), out flag)) c.DisconnectAlert = flag;
             c.SelectedDeviceId = Get(kv, "SelectedDeviceId");
             c.ActiveProfile = Get(kv, "ActiveProfile");
             c.TrayVisibleIds = Get(kv, "TrayVisibleIds");
             c.TrayOrder = Get(kv, "TrayOrder");
+            c.LoadThresholdOverrides(Get(kv, "LowThresholds"));
 
             if (!File.Exists(ProfilesPath))
             {
@@ -160,6 +204,29 @@ namespace HyzMouseHub
             return c;
         }
 
+        private void LoadThresholdOverrides(string encoded)
+        {
+            if (string.IsNullOrEmpty(encoded)) return;
+            foreach (string part in encoded.Split(';'))
+            {
+                if (string.IsNullOrEmpty(part)) continue;
+                int colon = part.LastIndexOf(':');
+                if (colon <= 0 || colon >= part.Length - 1) continue;
+                int value;
+                if (!int.TryParse(part.Substring(colon + 1), out value)) continue;
+                if (value < 0 || value > 100) continue;
+                LowThresholdOverrides[part.Substring(0, colon).Trim()] = value;
+            }
+        }
+
+        private string EncodeThresholdOverrides()
+        {
+            List<string> parts = new List<string>();
+            foreach (KeyValuePair<string, int> kv in LowThresholdOverrides)
+                parts.Add(kv.Key + ":" + kv.Value);
+            return string.Join(";", parts.ToArray());
+        }
+
         public void Save()
         {
             Dictionary<string, string> kv = new Dictionary<string, string>();
@@ -167,6 +234,9 @@ namespace HyzMouseHub
             kv["RefreshSeconds"] = RefreshSeconds.ToString();
             kv["LowThreshold"] = LowThreshold.ToString();
             kv["SleepTimeoutMinutes"] = SleepTimeoutMinutes.ToString();
+            kv["ChargeFullAlert"] = ChargeFullAlert.ToString();
+            kv["DisconnectAlert"] = DisconnectAlert.ToString();
+            kv["LowThresholds"] = EncodeThresholdOverrides();
             kv["SelectedDeviceId"] = SelectedDeviceId;
             kv["ActiveProfile"] = ActiveProfile;
             kv["TrayVisibleIds"] = TrayVisibleIds;
@@ -183,7 +253,7 @@ namespace HyzMouseHub
                   .Append(p.Stage).Append('\t')
                   .Append(Escape(p.DeviceId)).AppendLine();
             }
-            File.WriteAllText(ProfilesPath, sb.ToString(), new UTF8Encoding(false));
+            WriteFileAtomic(ProfilesPath, sb.ToString(), new UTF8Encoding(false));
         }
 
         public MouseProfile FindProfile(string name)
@@ -207,13 +277,19 @@ namespace HyzMouseHub
             catch { return false; }
         }
 
-        public static void SetAutoStart(bool enabled)
+        /// <summary>写启动项并回读校验；失败时把原因写入 LastAutoStartError，不再静默。</summary>
+        public static bool SetAutoStart(bool enabled)
         {
+            LastAutoStartError = null;
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
                 {
-                    if (key == null) return;
+                    if (key == null)
+                    {
+                        LastAutoStartError = "无法打开启动项注册表键";
+                        return false;
+                    }
                     if (enabled)
                     {
                         string exe = Path.ChangeExtension(ApplicationExecutablePath(), ".exe");
@@ -224,8 +300,18 @@ namespace HyzMouseHub
                         key.DeleteValue("HYZMouseHub", false);
                     }
                 }
+                if (IsAutoStartEnabled() != enabled)
+                {
+                    LastAutoStartError = "写入后校验未通过，可能被安全软件拦截";
+                    return false;
+                }
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LastAutoStartError = ex.Message;
+                return false;
+            }
         }
 
         private static string ApplicationExecutablePath()
@@ -252,7 +338,29 @@ namespace HyzMouseHub
             StringBuilder sb = new StringBuilder();
             foreach (KeyValuePair<string, string> pair in kv)
                 sb.Append(pair.Key).Append('=').Append(pair.Value).AppendLine();
-            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+            WriteFileAtomic(path, sb.ToString(), new UTF8Encoding(false));
+        }
+
+        /// <summary>
+        /// 先写同目录临时文件再替换，避免进程退出 / 断电时留下半截 ini。
+        /// 路径都在 %AppData% 下，同卷替换可用 File.Replace；首次写入用 Move。
+        /// </summary>
+        private static void WriteFileAtomic(string path, string content, Encoding encoding)
+        {
+            string dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            string tmp = path + ".tmp";
+            try
+            {
+                File.WriteAllText(tmp, content, encoding);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+            }
+            catch
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                throw;
+            }
         }
 
         private static string Get(Dictionary<string, string> kv, string key)

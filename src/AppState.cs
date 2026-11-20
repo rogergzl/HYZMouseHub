@@ -49,6 +49,13 @@ namespace HyzMouseHub
         public int DisplayMode { get { return _config.DisplayMode; } }
         public int RefreshSeconds { get { return _config.RefreshSeconds; } }
         public int LowThreshold { get { return _config.LowThreshold; } }
+        public int LowThresholdFor(string deviceId) { return _config.EffectiveLowThreshold(deviceId); }
+        public bool HasLowThresholdOverride(string deviceId)
+        {
+            return !string.IsNullOrEmpty(deviceId) && _config.LowThresholdOverrides.ContainsKey(deviceId);
+        }
+        public bool ChargeFullAlert { get { return _config.ChargeFullAlert; } }
+        public bool DisconnectAlert { get { return _config.DisconnectAlert; } }
         /// <summary>设备无应答后仍保留上次读数的时长（分钟），超过才显示休眠。</summary>
         public int SleepTimeoutMinutes { get { return _config.SleepTimeoutMinutes; } }
 
@@ -71,7 +78,8 @@ namespace HyzMouseHub
         }
 
         /// <summary>一次写入整块外观设置：只落盘一次、只广播一次，避免中间态被另一处读到。</summary>
-        public void ApplyAppearance(int displayMode, int refreshSeconds, int lowThreshold, int sleepMinutes)
+        public void ApplyAppearance(int displayMode, int refreshSeconds, int lowThreshold, int sleepMinutes,
+                                    bool chargeFullAlert, bool disconnectAlert)
         {
             displayMode = displayMode == 1 ? 1 : 0;
             refreshSeconds = refreshSeconds == 30 ? 30 : (refreshSeconds == 90 ? 90 : 15);
@@ -79,13 +87,26 @@ namespace HyzMouseHub
             sleepMinutes = Math.Min(AppConfig.SleepTimeoutMax, Math.Max(AppConfig.SleepTimeoutMin, sleepMinutes));
 
             if (_config.DisplayMode == displayMode && _config.RefreshSeconds == refreshSeconds &&
-                _config.LowThreshold == lowThreshold && _config.SleepTimeoutMinutes == sleepMinutes)
+                _config.LowThreshold == lowThreshold && _config.SleepTimeoutMinutes == sleepMinutes &&
+                _config.ChargeFullAlert == chargeFullAlert && _config.DisconnectAlert == disconnectAlert)
                 return;
 
             _config.DisplayMode = displayMode;
             _config.RefreshSeconds = refreshSeconds;
             _config.LowThreshold = lowThreshold;
             _config.SleepTimeoutMinutes = sleepMinutes;
+            _config.ChargeFullAlert = chargeFullAlert;
+            _config.DisconnectAlert = disconnectAlert;
+            _config.PruneLowThresholdOverrides();
+            _config.Save();
+            Raise(StateArea.Appearance);
+        }
+
+        /// <summary>单设备阈值覆盖；设为全局值即移除覆盖。立即落盘并广播。</summary>
+        public void SetLowThresholdOverride(string deviceId, int value)
+        {
+            if (string.IsNullOrEmpty(deviceId)) return;
+            _config.SetLowThresholdOverride(deviceId, value);
             _config.Save();
             Raise(StateArea.Appearance);
         }

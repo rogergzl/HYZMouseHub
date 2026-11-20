@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Microsoft.Win32;
 using System.Windows.Forms;
 
 namespace HyzMouseHub
@@ -56,6 +57,9 @@ namespace HyzMouseHub
             public int DragStartX;
             public int DragStartY;
             public int DragMoved;
+            // 充电状态转移用于“充满提醒”：只在上次充电、这次不充且电量较高时提示一次。
+            public bool HasChargeState;
+            public bool LastCharging;
         }
 
         private readonly Dictionary<string, TrayEntry> _trays = new Dictionary<string, TrayEntry>();
@@ -70,8 +74,14 @@ namespace HyzMouseHub
         private bool _fullscreenPaused;
         private bool _startupRefreshPending = true;
         private int _secondsSinceRefresh;
+        private EventWaitHandle _showEvent;
+        private Thread _showListener;
+        private readonly HashSet<string> _knownDeviceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _knownDeviceNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private bool _presenceInitialized;
+        private bool? _lastDarkTray;
 
-        public TrayApp(DeviceService service, AppState state, bool startMinimized)
+        public TrayApp(DeviceService service, AppState state, bool startMinimized, bool singleInstanceListener = true)
         {
             _service = service;
             _state = state;
@@ -93,6 +103,7 @@ namespace HyzMouseHub
             _timer.Tick += OnTimerTick;
             _timer.Start();
 
+            if (singleInstanceListener) StartShowListener();
             RefreshNow();
             UpdateUi();
 
@@ -102,6 +113,29 @@ namespace HyzMouseHub
 
         public DeviceService Service { get { return _service; } }
         public AppState State { get { return _state; } }
+
+        /// <summary>第二实例通过命名事件唤醒本实例；诊断用的 TrayApp 不注册。</summary>
+        private void StartShowListener()
+        {
+            try
+            {
+                _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowEventName);
+                _showListener = new Thread(new ThreadStart(delegate
+                {
+                    while (true)
+                    {
+                        EventWaitHandle evt = _showEvent;
+                        if (evt == null) return;
+                        try { if (!evt.WaitOne()) return; }
+                        catch { return; }
+                        UiInvoke(OpenSettings);
+                    }
+                }));
+                _showListener.IsBackground = true;
+                _showListener.Start();
+            }
+            catch { }
+        }
 
         /// <summary>
         /// 状态中间层广播：任一处界面改了设置，这里统一刷新托盘图标与菜单，
@@ -355,28 +389,39 @@ namespace HyzMouseHub
             int cols = levels.Length;
             int rows = 1 + kinds.Length;
             int stride = cell * zoom + pad;
+            int blockHeight = rows * stride;
             try
             {
-                using (Bitmap sheet = new Bitmap(pad + cols * stride, pad + rows * stride))
+                // 同一批图标画两遍：上半浅色任务栏底、下半深色任务栏底。
+                // 只画一套的话深色系统的可读性根本验证不了。
+                using (Bitmap sheet = new Bitmap(pad + cols * stride, pad * 3 + blockHeight * 2))
                 using (Graphics g = Graphics.FromImage(sheet))
                 {
                     g.Clear(Color.FromArgb(0xEF, 0xEF, 0xEF));
+                    using (SolidBrush darkBack = new SolidBrush(Color.FromArgb(0x1E, 0x1E, 0x1E)))
+                        g.FillRectangle(darkBack, 0, pad * 2 + blockHeight, sheet.Width, pad + blockHeight);
                     g.InterpolationMode = InterpolationMode.NearestNeighbor;
                     g.PixelOffsetMode = PixelOffsetMode.Half;
-                    for (int r = 0; r < rows; r++)
+                    for (int theme = 0; theme < 2; theme++)
                     {
-                        for (int c = 0; c < cols; c++)
+                        _forceDark = theme == 1;
+                        _iconCache.Clear();
+                        int top = theme == 0 ? pad : pad * 2 + blockHeight;
+                        for (int r = 0; r < rows; r++)
                         {
-                            BatteryReading sample = new BatteryReading();
-                            sample.Percent = levels[c];
-                            sample.Online = levels[c] >= 0;
-                            sample.Charging = levels[c] == 47;
-                            int mode = r == 0 ? 0 : 1;
-                            DeviceKind kind = r == 0 ? DeviceKind.Mouse : kinds[r - 1];
-                            using (Icon icon = GetBatteryIcon(sample, kind, mode))
-                            using (Bitmap small = icon.ToBitmap())
+                            for (int c = 0; c < cols; c++)
                             {
-                                g.DrawImage(small, new Rectangle(pad + c * stride, pad + r * stride, cell * zoom, cell * zoom));
+                                BatteryReading sample = new BatteryReading();
+                                sample.Percent = levels[c];
+                                sample.Online = levels[c] >= 0;
+                                sample.Charging = levels[c] == 47;
+                                int mode = r == 0 ? 0 : 1;
+                                DeviceKind kind = r == 0 ? DeviceKind.Mouse : kinds[r - 1];
+                                using (Icon icon = GetBatteryIcon(sample, kind, mode))
+                                using (Bitmap small = icon.ToBitmap())
+                                {
+                                    g.DrawImage(small, new Rectangle(pad + c * stride, top + r * stride, cell * zoom, cell * zoom));
+                                }
                             }
                         }
                     }
@@ -385,6 +430,8 @@ namespace HyzMouseHub
             }
             finally
             {
+                _forceDark = null;
+                _iconCache.Clear();
                 ExitThread();
             }
         }
@@ -396,6 +443,29 @@ namespace HyzMouseHub
         private void UpdateUi()
         {
             List<DeviceSnapshot> snapshots = _service.Snapshot();
+
+            // 设备从列表中消失（拔掉接收器 / 卸载设备）时提醒一次；
+            // 休眠只是无应答、仍在列表里，不会触发。
+            if (_presenceInitialized && _state.DisconnectAlert)
+            {
+                foreach (KeyValuePair<string, string> kv in _knownDeviceNames)
+                {
+                    bool present = false;
+                    foreach (DeviceSnapshot s in snapshots)
+                        if (string.Equals(s.Info.Id, kv.Key, StringComparison.OrdinalIgnoreCase)) { present = true; break; }
+                    if (!present)
+                        Balloon(kv.Key, "设备已断开", kv.Value + " 已不在设备列表中", ToolTipIcon.Warning);
+                }
+            }
+            _knownDeviceIds.Clear();
+            _knownDeviceNames.Clear();
+            foreach (DeviceSnapshot s in snapshots)
+            {
+                _knownDeviceIds.Add(s.Info.Id);
+                _knownDeviceNames[s.Info.Id] = s.Info.ShortName;
+            }
+            _presenceInitialized = true;
+
             List<DeviceSnapshot> visible = new List<DeviceSnapshot>();
             foreach (DeviceSnapshot s in snapshots)
                 if (_state.IsTrayVisible(s.Info.Id)) visible.Add(s);
@@ -446,6 +516,8 @@ namespace HyzMouseHub
                 }
 
                 string title = s.Info.ShortName + "  " + s.Battery.StatusText;
+                if (s.Battery.Percent < 0 && !string.IsNullOrEmpty(s.Battery.Error))
+                    title += " · 读取失败：" + s.Battery.Error;
                 if (!string.IsNullOrEmpty(s.Battery.Detail)) title += " · " + s.Battery.Detail;
                 if (title.Length > 63) title = title.Substring(0, 63);
                 e.Notify.Text = title;
@@ -464,7 +536,9 @@ namespace HyzMouseHub
         private void CheckLowBattery(TrayEntry entry, DeviceSnapshot s)
         {
             BatteryReading b = s.Battery;
-            if (!b.Cached && b.Percent >= 0 && b.Percent <= _state.LowThreshold && !b.Charging)
+            // 每设备阈值优先，未覆盖时回退全局值。
+            int threshold = _state.LowThresholdFor(s.Info.Id);
+            if (!b.Cached && b.Percent >= 0 && b.Percent <= threshold && !b.Charging)
             {
                 if (entry.LastLowPercent != b.Percent)
                 {
@@ -477,9 +551,21 @@ namespace HyzMouseHub
                     catch { }
                 }
             }
-            else if (b.Percent > _state.LowThreshold + 5)
+            else if (b.Percent > threshold + 5)
             {
                 entry.LastLowPercent = -1;
+            }
+
+            // 充满提醒：上次读到充电、这次不充且电量接近满。缓存值不参与，避免误报。
+            if (!b.Cached && b.Percent >= 0)
+            {
+                if (entry.HasChargeState && entry.LastCharging && !b.Charging &&
+                    _state.ChargeFullAlert && b.Percent >= 95)
+                {
+                    Balloon(s.Info.Id, "电量已充满", s.Info.ShortName + " 已充满 " + b.Percent + "%", ToolTipIcon.Info);
+                }
+                entry.HasChargeState = true;
+                entry.LastCharging = b.Charging;
             }
         }
 
@@ -565,7 +651,7 @@ namespace HyzMouseHub
             {
                 string shown = _state.IsTrayVisible(s.Info.Id) ? "" : "  [隐藏]";
                 string mark = s.Battery.Online ? "" : (s.Battery.Cached ? "  [休眠 · 缓存]" : "  [休眠]");
-                ToolStripItem item = menu.Items.Add("  " + TypeMark(s.Info.Kind) + " " + s.Info.ShortName + "  " + s.Battery.StatusText + mark + shown);
+                ToolStripItem item = menu.Items.Add("  " + TypeMark(s.Info.Kind) + " " + s.Info.DisplayName + "  " + s.Battery.StatusText + mark + shown);
                 item.Enabled = false;
             }
             menu.Items.Add(new ToolStripSeparator());
@@ -611,8 +697,9 @@ namespace HyzMouseHub
             auto.Click += delegate
             {
                 bool enable = !auto.Checked;
-                AppConfig.SetAutoStart(enable);
-                auto.Checked = enable;
+                if (AppConfig.SetAutoStart(enable)) auto.Checked = enable;
+                else Balloon(deviceId, "开机自启设置失败",
+                    AppConfig.LastAutoStartError ?? "原因未知", ToolTipIcon.Warning);
             };
             menu.Items.Add(auto);
 
@@ -706,8 +793,28 @@ namespace HyzMouseHub
             _trays.Clear();
             foreach (Icon icon in _iconCache.Values) icon.Dispose();
             _iconCache.Clear();
+            if (_showEvent != null) { try { _showEvent.Close(); } catch { } _showEvent = null; }
             _syncForm.Dispose();
             ExitThread();
+        }
+
+        /// <summary>任务栏 / 开始菜单走 SystemUsesLightTheme：0=深色，1=浅色，未设置按浅色。</summary>
+        /// <summary>预览时强制指定深浅色，实际运行时为 null，按注册表判断。</summary>
+        private bool? _forceDark;
+
+        private static bool IsDarkTray()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object value = key == null ? null : key.GetValue("SystemUsesLightTheme");
+                    if (value != null) return (int)value == 0;
+                }
+            }
+            catch { }
+            return false;
         }
 
         private Icon GetBatteryIcon(BatteryReading battery, DeviceKind kind, int displayMode)
@@ -718,6 +825,14 @@ namespace HyzMouseHub
             // 这样既能继续看到电量，又和实时读数一眼可分。
             bool offline = level < 0;
             bool stale = battery.Cached;
+            bool hasError = level < 0 && !string.IsNullOrEmpty(battery.Error);
+            bool dark = _forceDark.HasValue ? _forceDark.Value : IsDarkTray();
+            // 主题切换后旧图标的明暗不对，缓存整体失效；变化很少发生，不逐个 Dispose。
+            if (!_lastDarkTray.HasValue || _lastDarkTray.Value != dark)
+            {
+                _iconCache.Clear();
+                _lastDarkTray = dark;
+            }
 
             // Tray icons are 16px at 100% (20/24/32px at higher scaling). Drawing at
             // the native small-icon size keeps the digits sharp; downscaling one
@@ -731,7 +846,8 @@ namespace HyzMouseHub
             catch { }
 
             string key = size + "|" + (offline ? "off" : level.ToString()) + "|" +
-                         (charging ? "c" : "") + (stale ? "s" : "") + "|" + displayMode + "|" + (int)kind;
+                         (charging ? "c" : "") + (stale ? "s" : "") + (dark ? "d" : "l") +
+                         (hasError ? "e" : "") + "|" + displayMode + "|" + (int)kind;
             Icon cached;
             if (_iconCache.TryGetValue(key, out cached)) return cached;
 
@@ -746,9 +862,18 @@ namespace HyzMouseHub
                 float scale = size / 16f;
                 g.ScaleTransform(scale, scale);
                 if (displayMode == 1)
-                    DrawDeviceGlyph(g, offline ? -1 : level, charging, offline, kind);
+                    DrawDeviceGlyph(g, offline ? -1 : level, charging, offline, kind, dark);
                 else
-                    DrawNumberGlyph(g, offline ? -1 : level, charging, scale);
+                    DrawNumberGlyph(g, offline ? -1 : level, charging, scale, dark, hasError);
+
+                // 读取失败时加一个红点，和“休眠”的灰色 -- 区分开。
+                if (hasError)
+                {
+                    g.ResetTransform();
+                    g.ScaleTransform(scale, scale);
+                    using (SolidBrush mark = new SolidBrush(Color.FromArgb(0xE2, 0x3A, 0x3A)))
+                        g.FillEllipse(mark, 12.2f, 0.4f, 3.4f, 3.4f);
+                }
 
                 if (stale)
                 {
@@ -765,15 +890,19 @@ namespace HyzMouseHub
             }
         }
 
-        private static void DrawNumberGlyph(Graphics g, int level, bool charging, float scale)
+        private static void DrawNumberGlyph(Graphics g, int level, bool charging, float scale,
+                                            bool darkTray, bool hasError)
         {
-            // 纯数字：透明背景，直接绘制黑色粗体百分比，不画底色块。
+            // 透明背景：跟随任务栏主题切换文字明暗；读取失败用红色 -- 区分休眠。
             string text = level < 0 ? "--" : (level > 99 ? "100" : level.ToString());
             // 16px 下用像素对齐的粗体数字，字号取整避免亚像素模糊。
             float fontPx = (text.Length >= 3 ? 9.5f : 11.6f) * scale;
+            Color textColor = hasError ? Color.FromArgb(0xE2, 0x3A, 0x3A)
+                             : darkTray ? Color.FromArgb(0xF2, 0xF4, 0xF6)
+                                        : Color.FromArgb(0x0C, 0x0C, 0x0C);
             using (Font font = new Font("Segoe UI", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
             using (StringFormat sf = new StringFormat())
-            using (SolidBrush brush = new SolidBrush(Color.FromArgb(0x0C, 0x0C, 0x0C)))
+            using (SolidBrush brush = new SolidBrush(textColor))
             {
                 sf.Alignment = StringAlignment.Center;
                 sf.LineAlignment = StringAlignment.Center;
@@ -800,11 +929,28 @@ namespace HyzMouseHub
             }
         }
 
-        private static void DrawDeviceGlyph(Graphics g, int level, bool charging, bool offline, DeviceKind kind)
+        private static void DrawDeviceGlyph(Graphics g, int level, bool charging, bool offline, DeviceKind kind,
+                                            bool darkTray)
         {
-            if (kind == DeviceKind.Keyboard) DrawKeyboardGlyph(g, level, charging, offline);
-            else if (kind == DeviceKind.Headset) DrawHeadsetGlyph(g, level, charging, offline);
-            else DrawMouseGlyph(g, level, charging, offline);
+            if (kind == DeviceKind.Keyboard) DrawKeyboardGlyph(g, level, charging, offline, darkTray);
+            else if (kind == DeviceKind.Headset) DrawHeadsetGlyph(g, level, charging, offline, darkTray);
+            else DrawMouseGlyph(g, level, charging, offline, darkTray);
+        }
+
+        /// <summary>
+        /// 图标模式在深色任务栏上要换一套底色：机身改成深灰、描边改成亮色。
+        /// 只把描边改亮不够——纯描边元素（鼠标滚轮、键盘键位、耳机横梁）在深底上
+        /// 原本是深色，会整条消失，只剩下白色块。
+        /// </summary>
+        private static Color GlyphBaseColor(bool offline, bool darkTray)
+        {
+            if (offline) return darkTray ? Color.FromArgb(0x4A, 0x50, 0x58) : Color.FromArgb(0xB8, 0xBD, 0xC4);
+            return darkTray ? Color.FromArgb(0x2A, 0x2E, 0x36) : Color.FromArgb(0xF2, 0xF4, 0xF6);
+        }
+
+        private static Color GlyphLineColor(bool darkTray)
+        {
+            return darkTray ? Color.FromArgb(0xE6, 0xEA, 0xEF) : Color.FromArgb(0x24, 0x24, 0x2A);
         }
 
         /// <summary>电量档位色：红 ≤15%、黄 ≤40%、绿 >40%；无读数用中性灰。</summary>
@@ -816,9 +962,9 @@ namespace HyzMouseHub
             return Color.FromArgb(0x2E, 0xA5, 0x5F);
         }
 
-        private static void DrawMouseGlyph(Graphics g, int level, bool charging, bool offline)
+        private static void DrawMouseGlyph(Graphics g, int level, bool charging, bool offline, bool darkTray)
         {
-            Color baseColor = offline ? Color.FromArgb(0xB8, 0xBD, 0xC4) : Color.FromArgb(0xF2, 0xF4, 0xF6);
+            Color baseColor = GlyphBaseColor(offline, darkTray);
             Color status = StatusColor(level, offline);
 
             using (GraphicsPath body = RoundRect(2.4f, 1.2f, 11.2f, 13.6f, 3.4f))
@@ -836,7 +982,7 @@ namespace HyzMouseHub
                         g.ResetClip();
                     }
                 }
-                using (Pen line = new Pen(Color.FromArgb(0x24, 0x24, 0x2A), 0.85f))
+                using (Pen line = new Pen(GlyphLineColor(darkTray), 0.85f))
                 {
                     g.DrawPath(line, body);
                     g.DrawPath(line, wheel);
@@ -846,9 +992,9 @@ namespace HyzMouseHub
             if (charging) DrawBolt(g, new PointF(11f, 0.1f), Color.FromArgb(255, 214, 10), 0.44f);
         }
 
-        private static void DrawKeyboardGlyph(Graphics g, int level, bool charging, bool offline)
+        private static void DrawKeyboardGlyph(Graphics g, int level, bool charging, bool offline, bool darkTray)
         {
-            Color baseColor = offline ? Color.FromArgb(0xB8, 0xBD, 0xC4) : Color.FromArgb(0xF2, 0xF4, 0xF6);
+            Color baseColor = GlyphBaseColor(offline, darkTray);
             Color status = StatusColor(level, offline);
             using (GraphicsPath body = RoundRect(0.8f, 3.2f, 14.4f, 9.6f, 1.6f))
             {
@@ -864,7 +1010,7 @@ namespace HyzMouseHub
                         g.ResetClip();
                     }
                 }
-                using (Pen line = new Pen(Color.FromArgb(0x24, 0x24, 0x2A), 0.8f))
+                using (Pen line = new Pen(GlyphLineColor(darkTray), 0.8f))
                 {
                     g.DrawPath(line, body);
                     // 三排键位短线，保持键盘可辨识。
@@ -882,11 +1028,11 @@ namespace HyzMouseHub
             if (charging) DrawBolt(g, new PointF(11.4f, 0.2f), Color.FromArgb(255, 214, 10), 0.42f);
         }
 
-        private static void DrawHeadsetGlyph(Graphics g, int level, bool charging, bool offline)
+        private static void DrawHeadsetGlyph(Graphics g, int level, bool charging, bool offline, bool darkTray)
         {
-            Color baseColor = offline ? Color.FromArgb(0xB8, 0xBD, 0xC4) : Color.FromArgb(0xF2, 0xF4, 0xF6);
+            Color baseColor = GlyphBaseColor(offline, darkTray);
             Color status = StatusColor(level, offline);
-            using (Pen band = new Pen(Color.FromArgb(0x24, 0x24, 0x2A), 1.5f))
+            using (Pen band = new Pen(GlyphLineColor(darkTray), 1.5f))
                 g.DrawArc(band, 2.2f, 1f, 11.6f, 10f, 180f, 180f);
 
             using (GraphicsPath left = RoundRect(1.2f, 6.4f, 3.6f, 7f, 1.5f))
@@ -908,7 +1054,7 @@ namespace HyzMouseHub
                         g.ResetClip();
                     }
                 }
-                using (Pen line = new Pen(Color.FromArgb(0x24, 0x24, 0x2A), 0.8f))
+                using (Pen line = new Pen(GlyphLineColor(darkTray), 0.8f))
                 {
                     g.DrawPath(line, left);
                     g.DrawPath(line, right);

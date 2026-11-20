@@ -10,7 +10,7 @@ namespace HyzMouseHub
     //   Response: 13 4A 01 00 02 <percent> <charge> ... [sum8 at byte 19]
     //   charge  : 0x01 = discharging, 0x10 = charging.
     // Protocol source: GearPower profiles/leobog-hi98pro.json (not verified on our hardware).
-    internal sealed class LeobogProvider : DeviceProviderBase
+    internal sealed class LeobogProvider : DeviceProviderBase, IProviderCacheRekey
     {
         private const ushort LeobogVid = 0x3554;
         private const ushort KeyboardPid = 0xFA09;
@@ -18,6 +18,19 @@ namespace HyzMouseHub
 
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, string[]> Paths = new Dictionary<string, string[]>();
+
+        public void Rekey(string oldId, string newId)
+        {
+            if (string.Equals(oldId, newId, StringComparison.OrdinalIgnoreCase)) return;
+            lock (CacheLock)
+            {
+                string[] paths;
+                if (!Paths.TryGetValue(oldId, out paths)) return;
+                Paths.Remove(oldId);
+                Paths[newId] = paths;
+            }
+        }
+
 
         public override string Name
         {

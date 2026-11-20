@@ -130,6 +130,25 @@ namespace HyzMouseHub
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern uint WaitForSingleObject(IntPtr h, uint ms);
 
+        /// <summary>
+        /// HID 路径的短哈希，用于区分同 VID:PID 的多个接收器。
+        /// 路径在同一台机器上插同一USB口时稳定、换口时不同，正好满足“按设备区分”的需要。
+        /// </summary>
+        internal static string ShortHash(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "00000000";
+            unchecked
+            {
+                uint hash = 2166136261; // FNV-1a
+                for (int i = 0; i < value.Length; i++)
+                {
+                    hash ^= value[i];
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8");
+            }
+        }
+
         internal static List<HidDeviceDescriptor> Enumerate()
         {
             List<HidDeviceDescriptor> result = new List<HidDeviceDescriptor>();

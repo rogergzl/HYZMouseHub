@@ -15,7 +15,7 @@ namespace HyzMouseHub
     // have no public battery protocol. We read a standard HID Battery Strength
     // feature report when one is declared; otherwise the device is listed with
     // an honest "unknown" state. Use --probe=1395:0089 to export raw reports.
-    internal sealed class EposProvider : DeviceProviderBase
+    internal sealed class EposProvider : DeviceProviderBase, IProviderCacheRekey
     {
         private const ushort EposVid = 0x1395;
         private const int CapricornLength = 107;
@@ -29,6 +29,19 @@ namespace HyzMouseHub
 
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, Target> Targets = new Dictionary<string, Target>();
+
+        public void Rekey(string oldId, string newId)
+        {
+            if (string.Equals(oldId, newId, StringComparison.OrdinalIgnoreCase)) return;
+            lock (CacheLock)
+            {
+                Target target;
+                if (!Targets.TryGetValue(oldId, out target)) return;
+                Targets.Remove(oldId);
+                Targets[newId] = target;
+            }
+        }
+
 
         public override string Name
         {

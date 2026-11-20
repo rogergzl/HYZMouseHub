@@ -11,6 +11,12 @@ namespace HyzMouseHub
 {
     internal static class Program
     {
+        /// <summary>第二实例启动时用它唤醒已运行实例的主界面。</summary>
+        internal const string ShowEventName = @"Local\HYZMouseHub_ShowSettings";
+        private const string SingleInstanceName = @"Local\HYZMouseHub_SingleInstance";
+        // 静态持有：Mutex 被 GC 回收会提前释放，导致单实例保护失效。
+        private static Mutex _instanceMutex;
+
         [STAThread]
         private static int Main(string[] args)
         {
@@ -124,9 +130,30 @@ namespace HyzMouseHub
                 }
             }
 
+            // 诊断 / 截图命令允许与正在运行的托盘程序并存；正式 GUI 实例才做单实例保护。
+            bool diagnosticsOnly = !string.IsNullOrEmpty(snapshotPath) || !string.IsNullOrEmpty(iconPreviewPath);
+            if (!diagnosticsOnly)
+            {
+                bool createdNew;
+                _instanceMutex = new Mutex(true, SingleInstanceName, out createdNew);
+                if (!createdNew)
+                {
+                    // 已有实例：通知它显示主界面后退出，避免双份托盘图标抢 HID。
+                    _instanceMutex.Close();
+                    _instanceMutex = null;
+                    try
+                    {
+                        using (EventWaitHandle evt = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName))
+                            evt.Set();
+                    }
+                    catch { }
+                    return 0;
+                }
+            }
+
             if (!string.IsNullOrEmpty(iconPreviewPath))
             {
-                TrayApp preview = new TrayApp(service, state, true);
+                TrayApp preview = new TrayApp(service, state, true, false);
                 System.Windows.Forms.Timer pt = new System.Windows.Forms.Timer();
                 pt.Interval = 600;
                 pt.Tick += delegate
@@ -147,7 +174,7 @@ namespace HyzMouseHub
 
             if (!string.IsNullOrEmpty(snapshotPath))
             {
-                TrayApp snap = new TrayApp(service, state, true);
+                TrayApp snap = new TrayApp(service, state, true, false);
                 System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
                 t.Interval = 900;
                 t.Tick += delegate

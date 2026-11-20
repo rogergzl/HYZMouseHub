@@ -9,7 +9,7 @@ namespace HyzMouseHub
     // Windows, including report id 0). Battery: class 0x07 / id 0x80 (0..255).
     // DPI: class 0x04 / id 0x85 read, 0x05 write, with a read-back confirmation.
     // Transaction ids are per product id; a wrong id is silent, never an error.
-    internal sealed class RazerProvider : DeviceProviderBase
+    internal sealed class RazerProvider : DeviceProviderBase, IProviderCacheRekey
     {
         private const ushort RazerVid = 0x1532;
         private const int ReportLength = 91;
@@ -158,6 +158,19 @@ namespace HyzMouseHub
             { 0x00A3, new Meta("Cobra", 0xFF, 0x00) },
         };
         private static readonly Dictionary<string, string[]> Interfaces = new Dictionary<string, string[]>();
+
+        public void Rekey(string oldId, string newId)
+        {
+            if (string.Equals(oldId, newId, StringComparison.OrdinalIgnoreCase)) return;
+            lock (CacheLock)
+            {
+                string[] paths;
+                if (!Interfaces.TryGetValue(oldId, out paths)) return;
+                Interfaces.Remove(oldId);
+                Interfaces[newId] = paths;
+            }
+        }
+
 
         public override string Name
         {

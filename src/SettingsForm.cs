@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -19,10 +20,14 @@ namespace HyzMouseHub
         private readonly AppearanceCard _appearance = new AppearanceCard();
         private readonly VolumeCard _volume = new VolumeCard();
         private readonly SafetyCard _safety = new SafetyCard();
+        private readonly DiagnosticsCard _diagnostics = new DiagnosticsCard();
+        private readonly Button _about = new Button();
+        private readonly Button _diagnose = new Button();
         private readonly Label _status = new Label();
         private Panel _body;
 
         private bool _loading;
+        private string _thresholdDeviceIds = "";
 
         public SettingsForm(TrayApp app)
         {
@@ -103,6 +108,26 @@ namespace HyzMouseHub
                 Size = new Size(600, 22)
             };
             header.Controls.Add(subtitle);
+
+            _about.Text = "关于";
+            _about.Location = new Point(930, 18);
+            _about.Size = new Size(88, 30);
+            _about.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _about.FlatStyle = FlatStyle.Flat;
+            _about.FlatAppearance.BorderColor = Color.FromArgb(0xC8, 0xD4, 0xDE);
+            _about.BackColor = Color.White;
+            _about.Font = new Font("Segoe UI", 9.5F);
+            header.Controls.Add(_about);
+
+            _diagnose.Text = "读取诊断";
+            _diagnose.Location = new Point(834, 18);
+            _diagnose.Size = new Size(88, 30);
+            _diagnose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _diagnose.FlatStyle = FlatStyle.Flat;
+            _diagnose.FlatAppearance.BorderColor = Color.FromArgb(0xC8, 0xD4, 0xDE);
+            _diagnose.BackColor = Color.White;
+            _diagnose.Font = new Font("Segoe UI", 9.5F);
+            header.Controls.Add(_diagnose);
 
             Panel headerLine = new Panel
             {
@@ -299,6 +324,12 @@ namespace HyzMouseHub
             _profiles.Add.Click += delegate { AddProfile(); };
             _appearance.Save.Click += delegate { SaveSettings(); };
             _appearance.Close.Click += delegate { Hide(); };
+            _about.Click += delegate { ShowAbout(); };
+            _diagnose.Click += delegate { ShowDiagnostics(); };
+            _diagnostics.OpenLog.Click += delegate { OpenLogFolder(); };
+            _trayDevices.ThresholdDevice.SelectedIndexChanged += delegate { LoadThresholdForSelectedDevice(); };
+            _trayDevices.UseGlobal.CheckedChanged += delegate { SaveThresholdForSelectedDevice(); };
+            _trayDevices.Threshold.ValueChanged += delegate { SaveThresholdForSelectedDevice(); };
 
             _volume.EndpointList.SelectedIndexChanged += delegate
             {
@@ -349,6 +380,8 @@ namespace HyzMouseHub
                 _appearance.LowThreshold.Value = Clamp(_appearance.LowThreshold, _state.LowThreshold);
                 _appearance.SleepMinutes.Value = Clamp(_appearance.SleepMinutes, _state.SleepTimeoutMinutes);
                 _appearance.RefreshSleepHint();
+                _appearance.ChargeFullAlert.Checked = _state.ChargeFullAlert;
+                _appearance.DisconnectAlert.Checked = _state.DisconnectAlert;
                 _appearance.AutoStart.Checked = AppConfig.IsAutoStartEnabled();
             }
             finally { _loading = wasLoading; }
@@ -431,6 +464,8 @@ namespace HyzMouseHub
                     if (item != null && item.Device.Id == selected) { selectIndex = i; break; }
                 }
                 if (_device.DeviceList.Items.Count > 0) _device.DeviceList.SelectedIndex = selectIndex;
+                ReloadThresholdDevices();
+                RefreshDiagnostics();
                 UpdateDeviceLabels();
             }
             finally
@@ -479,7 +514,7 @@ namespace HyzMouseHub
                 UpdateCurrentDpiText("当前板载 DPI：--（未检测到设备）");
                 return;
             }
-            _device.Model.Text = TypeName(item.Device.Kind) + " · " + item.Device.ShortName + " · " + item.Device.VidPid;
+            _device.Model.Text = TypeName(item.Device.Kind) + " · " + item.Device.DisplayName + " · " + item.Device.VidPid;
             _device.Battery.Text = "电量 " + item.BatteryText + (item.Device.SupportsDpi ? "" : " · 不支持 DPI");
             _device.Sensor.Text = string.IsNullOrEmpty(item.Device.Sensor) ? "传感器 -- · " + item.Device.DpiNote : "传感器 " + item.Device.Sensor;
             DeviceSnapshot snap = FindSnapshot(item.Device.Id);
@@ -616,16 +651,157 @@ namespace HyzMouseHub
             SetStatus("已新建配置");
         }
 
+        private sealed class ThresholdDeviceItem
+        {
+            public readonly DeviceInfo Device;
+            public ThresholdDeviceItem(DeviceInfo device) { Device = device; }
+            public override string ToString() { return Device.DisplayName + " · " + Device.VidPid; }
+        }
+
+        /// <summary>设备列表没变化时不重建下拉框，避免定时刷新打断正在编辑的阈值。</summary>
+        private void ReloadThresholdDevices()
+        {
+            List<DeviceSnapshot> snapshots = _service.Snapshot();
+            StringBuilder ids = new StringBuilder();
+            foreach (DeviceSnapshot s in snapshots) ids.Append(s.Info.Id).Append('|');
+            string signature = ids.ToString();
+            bool same = signature == _thresholdDeviceIds && _trayDevices.ThresholdDevice.Items.Count > 0;
+            if (same) return;
+
+            object current = _trayDevices.ThresholdDevice.SelectedItem;
+            string selectedId = current is ThresholdDeviceItem ? ((ThresholdDeviceItem)current).Device.Id : "";
+            _trayDevices.ThresholdDevice.Items.Clear();
+            int pick = -1;
+            foreach (DeviceSnapshot s in snapshots)
+            {
+                _trayDevices.ThresholdDevice.Items.Add(new ThresholdDeviceItem(s.Info));
+                if (string.Equals(s.Info.Id, selectedId, StringComparison.OrdinalIgnoreCase))
+                    pick = _trayDevices.ThresholdDevice.Items.Count - 1;
+            }
+            _thresholdDeviceIds = signature;
+            if (pick < 0 && _trayDevices.ThresholdDevice.Items.Count > 0) pick = 0;
+            bool wasLoading = _loading;
+            _loading = true;
+            try
+            {
+                _trayDevices.ThresholdDevice.SelectedIndex = pick;
+            }
+            finally { _loading = wasLoading; }
+            LoadThresholdForSelectedDevice();
+        }
+
+        private void LoadThresholdForSelectedDevice()
+        {
+            if (_loading) return;
+            ThresholdDeviceItem item = _trayDevices.ThresholdDevice.SelectedItem as ThresholdDeviceItem;
+            bool wasLoading = _loading;
+            _loading = true;
+            try
+            {
+                if (item == null)
+                {
+                    _trayDevices.Threshold.Enabled = false;
+                    _trayDevices.Threshold.Value = _trayDevices.Threshold.Minimum;
+                    return;
+                }
+                bool overridden = _state.HasLowThresholdOverride(item.Device.Id);
+                _trayDevices.UseGlobal.Checked = !overridden;
+                _trayDevices.Threshold.Enabled = overridden;
+                _trayDevices.Threshold.Value = Clamp(_trayDevices.Threshold, _state.LowThresholdFor(item.Device.Id));
+            }
+            finally { _loading = wasLoading; }
+        }
+
+        private void SaveThresholdForSelectedDevice()
+        {
+            if (_loading) return;
+            ThresholdDeviceItem item = _trayDevices.ThresholdDevice.SelectedItem as ThresholdDeviceItem;
+            if (item == null) return;
+            _trayDevices.Threshold.Enabled = !_trayDevices.UseGlobal.Checked;
+            int value = _trayDevices.UseGlobal.Checked
+                ? _state.LowThreshold
+                : (int)_trayDevices.Threshold.Value;
+            _state.SetLowThresholdOverride(item.Device.Id, value);
+            SetStatus(_trayDevices.UseGlobal.Checked
+                ? item.Device.DisplayName + " 的低电量阈值已跟随全局"
+                : item.Device.DisplayName + " 的低电量阈值设为 " + value + "%");
+        }
+
+        private void RefreshDiagnostics()
+        {
+            if (IsDisposed) return;
+            List<string> errors = _service.RecentErrors();
+            _diagnostics.Errors.Text = errors.Count == 0
+                ? "暂无读取失败记录。"
+                : string.Join(Environment.NewLine, errors.ToArray());
+        }
+
+        /// <summary>
+        /// 诊断卡片平时不占主界面版面——两张卡片叠下去整个窗口就要滚动，
+        /// 而这条信息绝大多数时候是空的。改成点「读取诊断」按需弹出。
+        /// </summary>
+        private void ShowDiagnostics()
+        {
+            RefreshDiagnostics();
+            using (Form dialog = new Form())
+            {
+                dialog.Text = "读取诊断";
+                dialog.ClientSize = new Size(560, _diagnostics.NaturalHeight + 24);
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.BackColor = Color.White;
+
+                // 同一个控件只能有一个父容器：弹窗期间挂过来，关掉再摘掉。
+                _diagnostics.Dock = DockStyle.Fill;
+                dialog.Controls.Add(_diagnostics);
+                dialog.ShowDialog(this);
+                dialog.Controls.Remove(_diagnostics);
+                _diagnostics.Dock = DockStyle.None;
+                _diagnostics.Height = _diagnostics.NaturalHeight;
+            }
+        }
+
+        private void OpenLogFolder()
+        {
+            try
+            {
+                System.Diagnostics.Process.Start("explorer.exe", "\"" + AppConfig.ConfigDir + "\"");
+                SetStatus("已打开配置目录");
+            }
+            catch { SetStatus("无法打开配置目录"); }
+        }
+
+        private static string AppVersion
+        {
+            get { return typeof(Program).Assembly.GetName().Version.ToString(3); }
+        }
+
+        private void ShowAbout()
+        {
+            MessageBox.Show(this,
+                "HYZ Mouse Hub v" + AppVersion + "\r\n\r\n" +
+                "轻量托盘电量角标显示器：把无线外设的电量放到任务栏一眼可见，\r\n" +
+                "附带板载 DPI 读写与多套配置。单文件绿色程序，无遥测、不联网。\r\n\r\n" +
+                "开源地址：github.com/rogergzl/HYZMouseHub",
+                "关于 HYZ Mouse Hub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         private void SaveSettings()
         {
+            bool autostartOk = AppConfig.SetAutoStart(_appearance.AutoStart.Checked);
             _state.ApplyAppearance(
                 _appearance.IconMode.Checked ? 1 : 0,
                 _appearance.Interval.SelectedIndex == 0 ? 15 : (_appearance.Interval.SelectedIndex == 1 ? 30 : 90),
                 (int)_appearance.LowThreshold.Value,
-                (int)_appearance.SleepMinutes.Value);
+                (int)_appearance.SleepMinutes.Value,
+                _appearance.ChargeFullAlert.Checked,
+                _appearance.DisconnectAlert.Checked);
             _app.ResetRefreshClock();
-            AppConfig.SetAutoStart(_appearance.AutoStart.Checked);
-            SetStatus("设置已保存");
+            SetStatus(autostartOk ? "设置已保存"
+                : "设置已保存，但开机自启失败：" + (AppConfig.LastAutoStartError ?? "原因未知"));
         }
 
         private void SetStatus(string text)
@@ -645,7 +821,7 @@ namespace HyzMouseHub
             public readonly DeviceInfo Device;
             public readonly string BatteryText;
             public DeviceItem(DeviceInfo device, string batteryText) { Device = device; BatteryText = batteryText; }
-            public override string ToString() { return Device.ShortName + " · " + BatteryText; }
+            public override string ToString() { return Device.DisplayName + " · " + BatteryText; }
         }
 
         private sealed class TrayDeviceItem
@@ -655,7 +831,7 @@ namespace HyzMouseHub
             public override string ToString()
             {
                 string type = Device.Kind == DeviceKind.Keyboard ? "键盘" : (Device.Kind == DeviceKind.Headset ? "耳机" : "鼠标");
-                return "[" + type + "] " + Device.ShortName;
+                return "[" + type + "] " + Device.DisplayName;
             }
         }
     }

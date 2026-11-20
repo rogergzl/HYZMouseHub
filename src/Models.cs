@@ -54,6 +54,26 @@ namespace HyzMouseHub
             get { return string.IsNullOrEmpty(Model) ? Name : Brand + " " + Model; }
         }
 
+        /// <summary>
+        /// 同型号多设备（同一鼠标同时连着 2.4G 接收器和线材）会各自拿到独立 ID，
+        /// 冲突的那台 ID 尾部带 HID 路径短哈希。界面用 DisplayName 把它带出来，
+        /// 否则两条记录文字完全一样，用户没法判断自己在选哪一台。
+        /// </summary>
+        public string InstanceTag
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(Id)) return "";
+                int i = Id.IndexOf('#');
+                return i < 0 || i + 1 >= Id.Length ? "" : Id.Substring(i + 1);
+            }
+        }
+
+        public string DisplayName
+        {
+            get { return InstanceTag.Length == 0 ? ShortName : ShortName + " · #" + InstanceTag; }
+        }
+
         public string VidPid
         {
             get { return VendorId.ToString("X4") + ":" + ProductId.ToString("X4"); }
@@ -128,6 +148,15 @@ namespace HyzMouseHub
         BatteryReading ReadBattery(DeviceInfo device);
         DpiReading ReadDpi(DeviceInfo device);
         bool WriteDpi(DeviceInfo device, int x, int y, int stage);
+    }
+
+    /// <summary>
+    /// 同 VID:PID 多接收器时，设备 ID 会被加上路径后缀。按旧 ID 缓存路径的 Provider
+    /// 实现此接口把缓存迁到新 ID，否则第一台设备会误用第二台的路径。
+    /// </summary>
+    internal interface IProviderCacheRekey
+    {
+        void Rekey(string oldId, string newId);
     }
 
     public abstract class DeviceProviderBase : IDeviceProvider
