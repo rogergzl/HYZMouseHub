@@ -140,12 +140,16 @@ namespace HyzMouseHub
 
         // ---------------- 板载 DPI ----------------
 
-        // 启动补读窗口的截止时间；窗口内每 5 秒最多读一次（规则同开机快速扫描）。
-        private DateTime _dpiWindowEnd;
-        // 本次运行已经读到过板载值的设备：读到即止，整次运行不再自动读。
-        private readonly HashSet<string> _dpiResolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 启动后 1 分钟的 5 秒探查窗口，整次运行只开一次：窗口内不受设置间隔限制，
+        // 每 5 秒试一次；某台设备读到值、或窗口到期，它就不再按 5 秒走。
+        private DateTime _dpiBurstEnd;
+        // 界面「读取中…」提示的截止时间，可以随打开设置窗口顺延，和探查节奏无关。
+        private DateTime _dpiHintEnd;
+        // 每台设备最后一次尝试读取的时间，用于按节奏节流。
         private readonly Dictionary<string, DateTime> _dpiLastAttempt =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        // 本次运行已经读到过值：补读窗口内只对还没读到的设备用 5 秒节奏，读到过就走刷新间隔。
+        private readonly HashSet<string> _dpiResolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// 最后一次读到的板载 DPI，跨重启保留。板载是硬件里存的档位，读到一次就一直算数：
@@ -170,29 +174,46 @@ namespace HyzMouseHub
             Raise(StateArea.Dpi);
         }
 
-        /// <summary>开一个 1 分钟的补读窗口：程序启动、自启动、以及每次打开设置窗口时调用。</summary>
+        /// <summary>
+        /// 开启动探查与「读取中…」提示：程序启动、自启动、以及每次打开设置窗口时调用。
+        /// 5 秒探查窗口整次运行只开一次（从第一次调用算 1 分钟），之后打开窗口只顺延提示文字。
+        /// </summary>
         public void BeginDpiWindow()
         {
-            DateTime end = DateTime.Now.AddSeconds(StartupBurst.WindowSeconds);
-            if (end > _dpiWindowEnd) _dpiWindowEnd = end;
+            if (_dpiBurstEnd == DateTime.MinValue)
+                _dpiBurstEnd = DateTime.Now.AddSeconds(StartupBurst.WindowSeconds);
+            DateTime hint = DateTime.Now.AddSeconds(StartupBurst.WindowSeconds);
+            if (hint > _dpiHintEnd) _dpiHintEnd = hint;
         }
 
-        /// <summary>补读窗口是否还开着（界面上据此决定显示「读取中…」还是 --）。</summary>
-        public bool DpiWindowActive { get { return DateTime.Now <= _dpiWindowEnd; } }
+        /// <summary>「读取中…」提示是否还开着（还没有存下值时，界面据此决定显示提示还是 --）。</summary>
+        public bool DpiWindowActive { get { return DateTime.Now <= _dpiHintEnd; } }
+
+        /// <summary>启动后 1 分钟的 5 秒探查窗口是否还在。</summary>
+        public bool DpiBurstActive { get { return DateTime.Now <= _dpiBurstEnd; } }
 
         /// <summary>
-        /// 这台设备现在该不该读板载 DPI：本次运行还没读到、窗口没到期、距上次尝试过了 5 秒。
-        /// 已读到的不再读，所以休眠、换窗口都不会把值刷掉。
+        /// 这台设备两次自动重读之间该等多久：启动后 1 分钟内、且本次运行还没读到它，固定 5 秒；
+        /// 其余情况一律跟设置里的刷新间隔走。
+        /// </summary>
+        public int DpiRepeatSecondsFor(string deviceId)
+        {
+            if (!string.IsNullOrEmpty(deviceId) && !_dpiResolved.Contains(deviceId) && DpiBurstActive)
+                return StartupBurst.IntervalSeconds;
+            return Math.Max(StartupBurst.IntervalSeconds, _config.RefreshSeconds);
+        }
+
+        /// <summary>
+        /// 这台设备现在该不该读板载 DPI：距上次尝试已经过了它该等的时长（见 DpiRepeatSecondsFor）。
+        /// 手动读取走服务的直读接口，不看这里。读到过也照样按节奏重读——运行期间在别处换了档位，
+        /// 下一个周期就能跟上；读不到（休眠）只是这一次没应答，已存的值不动，下一个周期再试。
         /// </summary>
         public bool DpiProbeDue(string deviceId)
         {
             if (string.IsNullOrEmpty(deviceId)) return false;
-            if (_dpiResolved.Contains(deviceId)) return false;
-            if (!DpiWindowActive) return false;
             DateTime last;
-            if (_dpiLastAttempt.TryGetValue(deviceId, out last) &&
-                (DateTime.Now - last).TotalSeconds < StartupBurst.IntervalSeconds) return false;
-            return true;
+            if (!_dpiLastAttempt.TryGetValue(deviceId, out last)) return true;
+            return (DateTime.Now - last).TotalSeconds >= DpiRepeatSecondsFor(deviceId);
         }
 
         public void MarkDpiProbe(string deviceId)

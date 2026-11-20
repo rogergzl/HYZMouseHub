@@ -82,7 +82,8 @@ namespace HyzMouseHub
 
         /// <summary>
         /// 每台设备最后一次读到的板载 DPI。板载数值不受休眠影响：
-        /// 只有启动读取、手动读取、手动写入会更新它，休眠、刷新、读写失败都不会清掉。
+        /// 启动 / 自启动、手动读取、手动写入和每个刷新间隔的自动重读会更新它，
+        /// 休眠、读写失败都不会清掉。
         /// </summary>
         public readonly Dictionary<string, DpiSnapshot> LastDpi =
             new Dictionary<string, DpiSnapshot>(StringComparer.OrdinalIgnoreCase);

@@ -40,6 +40,10 @@ namespace HyzMouseHub
         // 只区分「读到过」和「还没读到过」。自动补读由托盘侧按启动规则驱动。
         private bool _dpiReading;
         private string _dpiDeviceId = "";
+        // 用户手改过 X / Y / 档位、还没写入：这期间后台自动重读只更新「当前板载 DPI」那行文字，
+        // 不把输入框里的数字抢回去，否则每到一个刷新间隔就可能刷掉正在改的值。
+        private bool _dpiEdited;
+        private bool _dpiSyncing;
 
         public SettingsForm(TrayApp app)
         {
@@ -67,7 +71,13 @@ namespace HyzMouseHub
             DoubleBuffered = true;
             FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
-                if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+                if (e.CloseReason == CloseReason.UserClosing)
+                {
+                    // 关窗即放弃没写入的编辑，下次打开重新跟随硬件值。
+                    _dpiEdited = false;
+                    e.Cancel = true;
+                    Hide();
+                }
             };
 
             BuildUi();
@@ -297,6 +307,10 @@ namespace HyzMouseHub
             _dpi.Read.Click += delegate { ReadDpi(); };
             _dpi.Write.Click += delegate { ApplyDpi(); };
             _dpi.Rescan.Click += delegate { _app.RefreshNow(); };
+            // 用户手改数值就记下来：后台每个刷新间隔的自动重读不许把正在改的数字抢回去。
+            _dpi.X.ValueChanged += delegate { MarkDpiEdited(); };
+            _dpi.Y.ValueChanged += delegate { MarkDpiEdited(); };
+            _dpi.Stage.ValueChanged += delegate { MarkDpiEdited(); };
             _profiles.Profiles.SelectedIndexChanged += delegate
             {
                 MouseProfile p = _profiles.Profiles.SelectedItem as MouseProfile;
@@ -556,10 +570,11 @@ namespace HyzMouseHub
             if (item == null) return;
             _state.SetSelectedDevice(item.Device.Id);
             UpdateDeviceLabels();
-            // 换设备才补读；同一台设备不重复读，避免每个刷新周期都去敲接口。
+            // 换设备时催一次；真正读不读由中间层按节奏节流，这里只是尽早补上。
             if (item.Device.Id != _dpiDeviceId)
             {
                 _dpiDeviceId = item.Device.Id;
+                _dpiEdited = false;
                 ShowCachedDpi();
                 _app.ProbeDpi();
             }
@@ -599,7 +614,8 @@ namespace HyzMouseHub
 
         /// <summary>
         /// 显示中间层里存下的板载值。板载是硬件里的档位，读到一次就一直显示：
-        /// 只有启动 / 自启动补读、手动读取、手动写入、重启程序会改它，休眠不会。
+        /// 启动 / 自启动、手动读取、手动写入、以及每个刷新间隔的自动重读会改它，
+        /// 设备休眠时保持不动；运行时两次重读之间界面上的值不会跳成未知。
         /// </summary>
         private void ShowCachedDpi()
         {
@@ -628,10 +644,24 @@ namespace HyzMouseHub
         private void ApplyDpiToUi(DpiSnapshot s)
         {
             if (s == null || !s.IsValid) return;
-            _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, s.X));
-            _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, s.Y > 0 ? s.Y : s.X));
-            if (s.Stage > 0)
-                _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, s.Stage));
+            // 用户手改过、还没写入：只让上面那行「当前板载 DPI」跟着硬件走，输入框留着用户的值。
+            if (_dpiEdited) return;
+            _dpiSyncing = true;
+            try
+            {
+                _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, s.X));
+                _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, s.Y > 0 ? s.Y : s.X));
+                if (s.Stage > 0)
+                    _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, s.Stage));
+            }
+            finally { _dpiSyncing = false; }
+        }
+
+        /// <summary>记下「用户改过输入框」；程序自己填值时不算（_dpiSyncing / _loading 期间忽略）。</summary>
+        private void MarkDpiEdited()
+        {
+            if (_dpiSyncing || _loading) return;
+            _dpiEdited = true;
         }
 
         /// <summary>手动「读取硬件 DPI」：不管缓存里有没有值都去敲一次接口。</summary>
@@ -653,6 +683,7 @@ namespace HyzMouseHub
                     if (r.X > 0)
                     {
                         _state.RememberDpi(device.Id, r.X, r.Y, r.Stage);
+                        _dpiEdited = false;
                         ShowCachedDpi();
                         SetStatus("硬件 DPI：" + r.Text);
                         return;
@@ -677,8 +708,9 @@ namespace HyzMouseHub
                 {
                     if (ok)
                     {
-                        // 写入成功即视为新的板载值：手动修改是允许改板载值的四个时机之一。
+                        // 写入成功即视为新的板载值：手动修改是允许改板载值的时机之一。
                         _state.RememberDpi(device.Id, x, y, stage);
+                        _dpiEdited = false;
                         ShowCachedDpi();
                     }
                     SetStatus(ok ? "写入成功并已回读确认" : "写入失败：休眠 / 型号未识别 / 被占用");
@@ -714,6 +746,8 @@ namespace HyzMouseHub
             _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, p.DpiX));
             _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, p.DpiY));
             _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, p.Stage));
+            // 应用配置会真的写进硬件，输入框和板载值此刻一致，不再算「用户手改」。
+            _dpiEdited = false;
             _app.ApplyProfile(p);
             SetStatus("应用配置 " + p.Name);
         }

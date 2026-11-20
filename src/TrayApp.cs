@@ -105,7 +105,8 @@ namespace HyzMouseHub
             _timer.Start();
 
             if (singleInstanceListener) StartShowListener();
-            // 启动 / 自启动即开板载补读窗口：首轮扫描出设备后马上读，读到就定下来。
+            // 启动 / 自启动即启动探查：头 1 分钟每 5 秒试一次（不受设置间隔限制），
+            // 读到值或满 1 分钟后回到设置里的刷新间隔。
             _state.BeginDpiWindow();
             RefreshNow();
             UpdateUi();
@@ -206,8 +207,9 @@ namespace HyzMouseHub
             }
 
             _secondsSinceRefresh++;
-            // 板载补读窗口内（启动后 1 分钟）按 5 秒节奏重试；到期或读到后本调用自然空转。
-            if (_state.DpiWindowActive) ProbeDpi();
+            // 板载 DPI 的自动重读：节奏由中间层按当前生效刷新间隔节流，
+            // 这里每秒问一次，只有到点的那一轮才会真去敲接口。
+            ProbeDpi();
 
             // 间隔统一向中间层取：开机自启后的快速扫描期它是 5 秒，
             // 读到活动设备或窗口到期后自动回到设置值，这里无需分支。
@@ -354,8 +356,8 @@ namespace HyzMouseHub
         {
             UiInvoke(delegate
             {
-                // 打开窗口时再给一次补读机会：自启动后设备可能一直睡着，
-                // 等用户真的来看时把它叫醒读一次。已经读到过的设备不会再读。
+                // 打开窗口时刷新一次「读取中…」提示（还没有存下值时用它），
+                // 顺带催一次自动重读；是否真读仍由中间层按刷新间隔决定。
                 _state.BeginDpiWindow();
                 if (_settings == null || _settings.IsDisposed)
                 {
@@ -369,18 +371,22 @@ namespace HyzMouseHub
         }
 
         /// <summary>
-        /// 启动 / 自启动后补读板载 DPI：每台支持板载的设备各试一次，5 秒一个周期、最多 1 分钟，
-        /// 读到即落盘（此后不再自动读）。设备刚上电多半还在休眠，读不到不算失败，下一轮再试；
-        /// 读不到时界面继续显示上次存下的值，绝不把已有值换成「休眠」。
+        /// 板载 DPI 的自动重读，全程序只有这一处入口（内部再保证同一时刻只有一批在读）：
+        /// 启动后 1 分钟内不受设置间隔限制、每 5 秒试一次，某台设备读到值或窗口到期就回到设置间隔；
+        /// 手动读取走服务的直读接口，不看这里。设备这一轮没应答（休眠）且已有存下的值时直接跳过——
+        /// 板载值保持不动，等它应答了下一轮再读，不会因为休眠把档位刷成未知。
         /// </summary>
         internal void ProbeDpi()
         {
             if (_dpiProbing) return;
+            // 正有一轮设备刷新在跑时不并发去开同一个 HID 句柄，等它读完再补。
+            if (_refreshing) return;
             List<DeviceInfo> due = new List<DeviceInfo>();
             foreach (DeviceSnapshot s in _service.Snapshot())
             {
                 if (s.Info == null || !s.Info.SupportsDpi) continue;
                 if (!_state.DpiProbeDue(s.Info.Id)) continue;
+                if (IsAsleep(s) && _state.CachedDpi(s.Info.Id) != null) continue;
                 due.Add(s.Info);
             }
             if (due.Count == 0) return;
@@ -400,6 +406,17 @@ namespace HyzMouseHub
                 catch { }
                 finally { _dpiProbing = false; }
             });
+        }
+
+        /// <summary>
+        /// 这一轮设备没应答（休眠 / 沿用上次读数）：再读 DPI 也只是白等一次超时。
+        /// 只认「休眠」和「缓存」两种，别的读取失败（报文异常、状态码不对）仍会重试 DPI，
+        /// 因为那类失败未必挡着板载通道。
+        /// </summary>
+        private static bool IsAsleep(DeviceSnapshot s)
+        {
+            if (s.Battery == null) return true;
+            return !s.Battery.Online && (s.Battery.Cached || s.Battery.Sleeping);
         }
 
         /// <summary>外观设置变更后重置刷新计时，让新间隔立即生效。</summary>

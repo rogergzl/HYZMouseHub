@@ -72,6 +72,13 @@ namespace HyzMouseHub
                     PrintBurst(span < 5 ? 5 : span, blind);
                     return 0;
                 }
+                if (first == "--dpi-watch" || first.StartsWith("--dpi-watch="))
+                {
+                    int span = 40;
+                    if (first.Length > 12) int.TryParse(first.Substring(12), out span);
+                    PrintDpiWatch(span < 10 ? 10 : span);
+                    return 0;
+                }
                 if (first.StartsWith("--dpi="))
                 {
                     return SetDpiFromArgs(first.Substring(6));
@@ -315,6 +322,7 @@ namespace HyzMouseHub
             Console.WriteLine("--test-all      同时读取 DPI（会唤醒设备）");
             Console.WriteLine("--watch[=秒]    连续刷新 8 次，观察休眠保留窗口（默认间隔 3 秒）");
             Console.WriteLine("--burst[=秒[:blind]]  模拟开机自启，逐秒打印生效间隔；blind 忽略设备结果");
+            Console.WriteLine("--dpi-watch[=秒]  观察板载 DPI 自动重读的节奏与结果（默认 40 秒，只读不写）");
             Console.WriteLine("--dpi=ID,X,Y,STAGE  写入 DPI，例如 --dpi=RAZER:1532:00C1,1600,1600,1");
             Console.WriteLine("--probe=VID:PID  导出指定 HID 接口的特征/输入报告（协议适配用）");
             Console.WriteLine("--make-icon=路径  生成多尺寸程序图标 .ico");
@@ -441,8 +449,57 @@ namespace HyzMouseHub
             }
         }
 
-        private static int PrintProbe(string value)
+        /// <summary>
+        /// 诊断用：按托盘程序的节奏（每秒问一次中间层）跑一段板载 DPI 自动重读，打印每次真去读的时间与结果。
+        /// 用来确认「按刷新间隔重读、休眠时保持已有值」在现场的表现，只读不写设备。
+        /// </summary>
+        private static void PrintDpiWatch(int seconds)
         {
+            AppState state = new AppState(AppConfig.Load());
+            DeviceService service = new DeviceService(state);
+            state.BeginDpiWindow();
+            Console.WriteLine("板载 DPI 自动重读观察 " + seconds + " 秒：刷新间隔 " + state.RefreshSeconds
+                + " 秒；本次运行还没读到、又还在启动补读窗口内的按 " + StartupBurst.IntervalSeconds + " 秒重试。");
+            DateTime start = DateTime.Now;
+            Dictionary<string, DateTime> skipNote = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            while ((DateTime.Now - start).TotalSeconds < seconds)
+            {
+                int elapsed = (int)(DateTime.Now - start).TotalSeconds;
+                service.Refresh();
+                foreach (DeviceSnapshot s in service.Snapshot())
+                {
+                    if (s.Info == null || !s.Info.SupportsDpi) continue;
+                    if (!state.DpiProbeDue(s.Info.Id)) continue;
+
+                    DpiSnapshot cached = state.CachedDpi(s.Info.Id);
+                    bool asleep = s.Battery == null || (!s.Battery.Online && (s.Battery.Cached || s.Battery.Sleeping));
+                    if (asleep && cached != null)
+                    {
+                        // 休眠不覆盖已有值：跳过一次只提示一行，别每秒刷屏。
+                        DateTime lastNote;
+                        if (!skipNote.TryGetValue(s.Info.Id, out lastNote) ||
+                            (DateTime.Now - lastNote).TotalSeconds >= state.DpiRepeatSecondsFor(s.Info.Id))
+                        {
+                            skipNote[s.Info.Id] = DateTime.Now;
+                            Console.WriteLine("t={0,3}s  {1}  休眠，保持 {2}", elapsed, s.Info.ShortName, cached.Text);
+                        }
+                        continue;
+                    }
+
+                    state.MarkDpiProbe(s.Info.Id);
+                    int cadence = state.DpiRepeatSecondsFor(s.Info.Id);
+                    DpiReading r = service.ReadDpi(s.Info);
+                    if (r.X > 0) state.RememberDpi(s.Info.Id, r.X, r.Y, r.Stage);
+                    Console.WriteLine("t={0,3}s  [{1}s 节奏]  {2}  {3}  下次等 {4}s",
+                        elapsed, cadence, s.Info.ShortName,
+                        r.X > 0 ? "读到 " + r.Text : "读不到：" + (string.IsNullOrEmpty(r.Error) ? "未应答" : r.Error),
+                        state.DpiRepeatSecondsFor(s.Info.Id));
+                }
+                Thread.Sleep(1000);
+            }
+        }
+
+        private static int PrintProbe(string value)        {
             string[] parts = value.Split(':');
             ushort vid, pid;
             if (parts.Length != 2 ||
