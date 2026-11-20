@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -68,17 +69,51 @@ namespace HyzMouseHub
             int height = Math.Max(20, Height - Theme.CardChrome);
             Content.SetBounds(Theme.Pad, Theme.Pad + Theme.TitleHeight + Theme.TitleGap, width, height);
             LayoutContent();
+            SpreadRows();
+        }
+
+        /// <summary>
+        /// 卡片被拉到和同一行的邻居一样高时，内容区会多出一截。把这一截平均分到内容的
+        /// 行间隙上，内容顶上贴齐标题、底下贴齐卡片，不在底部积一块空白。
+        /// LayoutContent 每次从绝对坐标重排，重复调用不会累积偏移。
+        /// </summary>
+        private void SpreadRows()
+        {
+            List<int> tops = new List<int>();
+            int used = 0;
+            foreach (Control c in Content.Controls)
+            {
+                if (!c.Visible) continue;
+                tops.Add(c.Top);
+                if (c.Bottom > used) used = c.Bottom;
+            }
+            if (tops.Count == 0) return;
+
+            // 同一行的控件顶端常差一两像素（输入框在行内居中），先按 8px 容差归成一行，
+            // 否则它们会各自按不同系数下移，越撑越歪。
+            tops.Sort();
+            List<int> rows = new List<int>();
+            foreach (int top in tops)
+                if (rows.Count == 0 || top - rows[rows.Count - 1] > 8) rows.Add(top);
+
+            int extra = Content.Height - used;
+            if (rows.Count < 2 || extra < 6) return;
+
+            int step = extra / (rows.Count - 1);
+            if (step <= 0) return;
+
+            foreach (Control c in Content.Controls)
+            {
+                if (!c.Visible) continue;
+                int index = 0;
+                for (int i = 0; i < rows.Count; i++) if (c.Top >= rows[i]) index = i;
+                if (index > 0) c.Top += index * step;
+            }
         }
 
         /// <summary>子类在这里按 Content 的实际宽高摆放控件，坐标从内容区左上角算起。</summary>
         protected virtual void LayoutContent()
         {
-        }
-
-        /// <summary>列高不齐时吸收余量：可伸缩的卡片（列表类）覆写它，返回真正吃掉的像素。</summary>
-        public virtual int AbsorbSlack(int slack)
-        {
-            return 0;
         }
 
         protected static Label KeyLabel(string text)

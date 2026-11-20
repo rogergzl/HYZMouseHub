@@ -364,6 +364,87 @@ namespace HyzMouseHub
         }
 
         /// <summary>诊断用：把设置窗口渲染成 PNG，便于不依赖外部截图工具检查布局。</summary>
+        /// <summary>诊断用：把设置窗口里每个控件的矩形打印出来，核对同行是否等高、卡片是否齐平。</summary>
+        internal void DumpLayout()
+        {
+            SettingsForm f = new SettingsForm(this);
+            f.RefreshDevices();
+            f.Show();
+            Application.DoEvents();
+            Console.WriteLine("窗口 " + f.Width + "x" + f.Height + "  客户区 " + f.ClientSize);
+            DumpControl(f, 0);
+            f.Close();
+            f.Dispose();
+            ExitThread();
+        }
+
+        private static void DumpControl(Control parent, int depth)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                string text = c.Text == null ? "" : c.Text.Replace("\r", " ").Replace("\n", " ");
+                if (text.Length > 22) text = text.Substring(0, 22);
+                Console.WriteLine(new string(' ', depth * 2) + c.GetType().Name + " " +
+                                  c.Left + "," + c.Top + " " + c.Width + "x" + c.Height +
+                                  (text.Length > 0 ? "  \"" + text + "\"" : ""));
+                if (depth < 6) DumpControl(c, depth + 1);
+            }
+        }
+
+        /// <summary>诊断用：把「关于」窗口渲染成 PNG，检查教程文字的排版。</summary>
+        internal void CaptureAboutSnapshot(string path)
+        {
+            using (AboutForm about = new AboutForm())
+            {
+                about.StartPosition = FormStartPosition.Manual;
+                about.Location = new Point(0, 0);
+                about.Show();
+                Application.DoEvents();
+                about.PerformLayout();
+                Application.DoEvents();
+                using (Bitmap bmp = new Bitmap(about.Width, about.Height))
+                {
+                    about.DrawToBitmap(bmp, new Rectangle(0, 0, about.Width, about.Height));
+                    bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                about.Close();
+            }
+            ExitThread();
+        }
+
+        /// <summary>
+        /// 诊断用：抓真实屏幕而不是 DrawToBitmap。下拉框这类原生控件在 WM_PRINT 下
+        /// 不画外框，只有真截屏才能看出边框/底色到底长什么样。
+        /// </summary>
+        internal void CaptureScreenSnapshot(string path)
+        {
+            SettingsForm f = new SettingsForm(this);
+            f.RefreshDevices();
+            f.StartPosition = FormStartPosition.Manual;
+            f.Location = new Point(40, 40);
+            f.Show();
+            f.Activate();
+            Application.DoEvents();
+            System.Threading.Thread.Sleep(800);
+            Application.DoEvents();
+            Rectangle bounds = f.Bounds;
+            try
+            {
+                using (Bitmap bmp = new Bitmap(bounds.Width, bounds.Height))
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+                    bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+            }
+            finally
+            {
+                f.Close();
+                f.Dispose();
+            }
+            ExitThread();
+        }
+
         internal void CaptureSettingsSnapshot(string path)
         {
             SettingsForm f = new SettingsForm(this);
@@ -516,7 +597,7 @@ namespace HyzMouseHub
                 }
 
                 string title = s.Info.ShortName + "  " + s.Battery.StatusText;
-                if (s.Battery.Percent < 0 && !string.IsNullOrEmpty(s.Battery.Error))
+                if (s.Battery.Percent < 0 && !string.IsNullOrEmpty(s.Battery.Error) && !s.Battery.Sleeping)
                     title += " · 读取失败：" + s.Battery.Error;
                 if (!string.IsNullOrEmpty(s.Battery.Detail)) title += " · " + s.Battery.Detail;
                 if (title.Length > 63) title = title.Substring(0, 63);
@@ -825,7 +906,8 @@ namespace HyzMouseHub
             // 这样既能继续看到电量，又和实时读数一眼可分。
             bool offline = level < 0;
             bool stale = battery.Cached;
-            bool hasError = level < 0 && !string.IsNullOrEmpty(battery.Error);
+            // 休眠是正常状态，不是读取失败：休眠只画灰 --，不点红点。
+            bool hasError = level < 0 && !string.IsNullOrEmpty(battery.Error) && !battery.Sleeping;
             bool dark = _forceDark.HasValue ? _forceDark.Value : IsDarkTray();
             // 主题切换后旧图标的明暗不对，缓存整体失效；变化很少发生，不逐个 Dispose。
             if (!_lastDarkTray.HasValue || _lastDarkTray.Value != dark)

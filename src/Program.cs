@@ -107,6 +107,9 @@ namespace HyzMouseHub
             bool bootStart = false;
             string snapshotPath = null;
             string iconPreviewPath = null;
+            string aboutPreviewPath = null;
+            string screenShotPath = null;
+            bool dumpLayout = false;
             foreach (string arg in args)
             {
                 if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase))
@@ -128,10 +131,27 @@ namespace HyzMouseHub
                     iconPreviewPath = arg.Substring(15);
                     autostart = true;
                 }
+                else if (arg.StartsWith("--about-preview=", StringComparison.OrdinalIgnoreCase))
+                {
+                    aboutPreviewPath = arg.Substring(16);
+                    autostart = true;
+                }
+                else if (arg.StartsWith("--screen-shot=", StringComparison.OrdinalIgnoreCase))
+                {
+                    screenShotPath = arg.Substring(14);
+                    autostart = true;
+                }
+                else if (string.Equals(arg, "--ui-dump", StringComparison.OrdinalIgnoreCase))
+                {
+                    dumpLayout = true;
+                    autostart = true;
+                }
             }
 
             // 诊断 / 截图命令允许与正在运行的托盘程序并存；正式 GUI 实例才做单实例保护。
-            bool diagnosticsOnly = !string.IsNullOrEmpty(snapshotPath) || !string.IsNullOrEmpty(iconPreviewPath);
+            bool diagnosticsOnly = !string.IsNullOrEmpty(snapshotPath) || !string.IsNullOrEmpty(iconPreviewPath)
+                                   || dumpLayout || !string.IsNullOrEmpty(aboutPreviewPath)
+                                   || !string.IsNullOrEmpty(screenShotPath);
             if (!diagnosticsOnly)
             {
                 bool createdNew;
@@ -149,6 +169,69 @@ namespace HyzMouseHub
                     catch { }
                     return 0;
                 }
+            }
+
+            if (!string.IsNullOrEmpty(screenShotPath))
+            {
+                TrayApp shot = new TrayApp(service, state, true, false);
+                System.Windows.Forms.Timer st = new System.Windows.Forms.Timer();
+                st.Interval = 700;
+                st.Tick += delegate
+                {
+                    st.Stop();
+                    st.Dispose();
+                    try { shot.CaptureScreenSnapshot(screenShotPath); }
+                    catch (Exception ex)
+                    {
+                        try { Console.WriteLine(ex.ToString()); } catch { }
+                        shot.ExitThread();
+                    }
+                };
+                st.Start();
+                Application.Run(shot);
+                return 0;
+            }
+
+            if (!string.IsNullOrEmpty(aboutPreviewPath))
+            {
+                TrayApp about = new TrayApp(service, state, true, false);
+                System.Windows.Forms.Timer at = new System.Windows.Forms.Timer();
+                at.Interval = 700;
+                at.Tick += delegate
+                {
+                    at.Stop();
+                    at.Dispose();
+                    try { about.CaptureAboutSnapshot(aboutPreviewPath); }
+                    catch (Exception ex)
+                    {
+                        try { Console.WriteLine(ex.ToString()); } catch { }
+                        about.ExitThread();
+                    }
+                };
+                at.Start();
+                Application.Run(about);
+                return 0;
+            }
+
+            if (dumpLayout)
+            {
+                TrayApp probe = new TrayApp(service, state, true, false);
+                System.Windows.Forms.Timer dt = new System.Windows.Forms.Timer();
+                dt.Interval = 900;
+                dt.Tick += delegate
+                {
+                    dt.Stop();
+                    dt.Dispose();
+                    try { probe.DumpLayout(); }
+                    catch (Exception ex)
+                    {
+                        try { Console.WriteLine(ex.ToString()); } catch { }
+                        probe.ExitThread();
+                    }
+                };
+                dt.Start();
+                Application.Run(probe);
+                return 0;
             }
 
             if (!string.IsNullOrEmpty(iconPreviewPath))

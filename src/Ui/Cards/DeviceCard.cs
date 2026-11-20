@@ -18,10 +18,9 @@ namespace HyzMouseHub
         private readonly Label _batteryKey = KeyLabel("电量");
         private readonly Label _sensorKey = KeyLabel("传感器");
 
-        public DeviceCard() : base("设备状态", Theme.RowHeight + Theme.RowGap + ValueRow * 3)
+        public DeviceCard() : base("设备状态", Theme.FieldHeight + Theme.RowGap + ValueRow * 3)
         {
-            DeviceList.DropDownStyle = ComboBoxStyle.DropDownList;
-            Theme.StyleField(DeviceList);
+            Theme.StyleCombo(DeviceList);
             Content.Controls.Add(DeviceList);
 
             Content.Controls.Add(_modelKey);
@@ -35,10 +34,11 @@ namespace HyzMouseHub
         protected override void LayoutContent()
         {
             int w = Content.Width;
-            DeviceList.SetBounds(0, Math.Max(0, (Theme.RowHeight - DeviceList.Height) / 2), w, Theme.RowHeight);
+            int fieldHeight = Math.Min(Theme.FieldHeight, DeviceList.Height);
+            DeviceList.SetBounds(0, Math.Max(0, (Theme.FieldHeight - fieldHeight) / 2), w, fieldHeight);
 
             int keyWidth = 58;
-            int y = Theme.RowHeight + Theme.RowGap;
+            int y = Theme.FieldHeight + Theme.RowGap;
             Label[] keys = { _modelKey, _batteryKey, _sensorKey };
             Label[] values = { Model, Battery, Sensor };
             for (int i = 0; i < keys.Length; i++)

@@ -42,17 +42,16 @@ namespace HyzMouseHub
             }
 
             Content.Controls.Add(_intervalKey);
-            Interval.DropDownStyle = ComboBoxStyle.DropDownList;
             Interval.Items.AddRange(new object[] { "15 秒", "30 秒", "90 秒" });
             Interval.SelectedIndex = 0;
-            Theme.StyleField(Interval);
+            Theme.StyleCombo(Interval);
             Content.Controls.Add(Interval);
 
             Content.Controls.Add(_thresholdKey);
             LowThreshold.Minimum = 0;
             LowThreshold.Maximum = 50;
             LowThreshold.Value = 15;
-            LowThreshold.Height = Theme.RowHeight;
+            LowThreshold.Height = Theme.FieldHeight;
             Theme.StyleField(LowThreshold);
             Content.Controls.Add(LowThreshold);
             Content.Controls.Add(_thresholdUnit);
@@ -62,7 +61,7 @@ namespace HyzMouseHub
             SleepMinutes.Maximum = AppConfig.SleepTimeoutMax;
             SleepMinutes.Increment = 5;
             SleepMinutes.Value = AppConfig.SleepTimeoutDefault;
-            SleepMinutes.Height = Theme.RowHeight;
+            SleepMinutes.Height = Theme.FieldHeight;
             Theme.StyleField(SleepMinutes);
             Content.Controls.Add(SleepMinutes);
             Content.Controls.Add(_sleepUnit);

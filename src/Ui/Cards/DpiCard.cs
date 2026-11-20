@@ -18,7 +18,7 @@ namespace HyzMouseHub
         private readonly Label _yKey = KeyLabel("Y");
         private readonly Label _stageKey = KeyLabel("档位");
 
-        public DpiCard() : base("板载 DPI", Theme.RowHeight + Theme.RowGap + Theme.RowHeight)
+        public DpiCard() : base("板载 DPI", Theme.FieldHeight + Theme.RowGap + Theme.RowHeight)
         {
             AddField(_xKey, X, false);
             AddField(_yKey, Y, false);
@@ -41,7 +41,7 @@ namespace HyzMouseHub
             box.Maximum = stage ? 8 : 42000;
             box.Increment = stage ? 1 : 10;
             box.Value = stage ? 1 : 1600;
-            box.Height = Theme.RowHeight;
+            box.Height = Theme.FieldHeight;
             Theme.StyleField(box);
             Content.Controls.Add(key);
             Content.Controls.Add(box);
@@ -60,7 +60,7 @@ namespace HyzMouseHub
             x += groupWidth + 12;
             PlaceField(_stageKey, Stage, x, groupWidth);
 
-            int buttonTop = Theme.RowHeight + Theme.RowGap;
+            int buttonTop = Theme.FieldHeight + Theme.RowGap;
             int buttonWidth = Math.Max(96, (w - 8 * 2) / 3);
             Read.SetBounds(0, buttonTop, buttonWidth, Theme.RowHeight);
             Write.SetBounds(buttonWidth + 8, buttonTop, buttonWidth, Theme.RowHeight);
@@ -70,8 +70,8 @@ namespace HyzMouseHub
         private void PlaceField(Label key, NumericUpDown box, int left, int width)
         {
             int keyWidth = key.Text == "档位" ? 30 : 14;
-            key.SetBounds(left, 0, keyWidth, Theme.RowHeight);
-            box.SetBounds(left + keyWidth + 4, 0, Math.Max(40, width - keyWidth - 4), Theme.RowHeight);
+            key.SetBounds(left, 0, keyWidth, Theme.FieldHeight);
+            box.SetBounds(left + keyWidth + 4, 0, Math.Max(40, width - keyWidth - 4), Theme.FieldHeight);
         }
     }
 }

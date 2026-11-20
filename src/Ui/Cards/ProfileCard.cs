@@ -85,7 +85,6 @@ namespace HyzMouseHub
             Apply.Enabled = !empty;
             Rename.Enabled = !empty;
             Delete.Enabled = !empty;
-            Height = NaturalHeight;
         }
 
         protected override void LayoutContent()
@@ -94,7 +93,10 @@ namespace HyzMouseHub
             CurrentDpi.SetBounds(0, 0, w, HeadlineRow);
 
             int listTop = HeadlineRow + Theme.RowGap;
-            int listHeight = Math.Max(32, Content.Height - ContentFor(0));
+            // 没有配置时说明行只占一行高度，多出来的空间交给行间距，不把空框撑大。
+            int listHeight = _isEmpty
+                ? EmptyListHeight
+                : Math.Max(46, Content.Height - ContentFor(0));
             Profiles.SetBounds(0, listTop, w, listHeight);
             _empty.SetBounds(0, listTop, w, listHeight);
 

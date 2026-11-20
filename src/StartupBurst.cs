@@ -42,6 +42,12 @@ namespace HyzMouseHub
             return Math.Max(0, left);
         }
 
+        /// <summary>窗口到期或已达成目的时手动收尾（例如板载 DPI 已读到）。</summary>
+        public void Stop()
+        {
+            _active = false;
+        }
+
         /// <summary>用本轮扫描结果判定：只要有一台设备读到实时电量，就结束快速扫描。</summary>
         public void Observe(IList<DeviceSnapshot> snapshots)
         {

@@ -149,16 +149,22 @@ namespace HyzMouseHub
                             {
                                 s.Battery.Error = ex.Message;
                             }
-                            if (string.IsNullOrEmpty(s.Battery.Error) && s.Battery.Percent >= 0)
-                                ClearError(device.Id);
-                            else if (!string.IsNullOrEmpty(s.Battery.Error))
-                                RecordError(device.Id, device.ShortName, s.Battery.Error);
-                            ApplyHoldOver(s);
                             found.Add(s);
                         }
                     }
+                    // 先按真实读数合并重复条目，再注入缓存读数：反过来做，
+                    // 被合并掉的那条会先拿到缓存电量，看上去“两台都活着”，合并就失效了。
                     CollapseMirroredDevices(found);
                     DisambiguateIds(found, provider);
+                    foreach (DeviceSnapshot s in found)
+                    {
+                        if (string.IsNullOrEmpty(s.Battery.Error) && s.Battery.Percent >= 0)
+                            ClearError(s.Info.Id);
+                        // 休眠是无线设备的常态，不算读取失败，别写进诊断记录把日志刷满。
+                        else if (!string.IsNullOrEmpty(s.Battery.Error) && !s.Battery.Sleeping)
+                            RecordError(s.Info.Id, s.Info.ShortName, s.Battery.Error);
+                        ApplyHoldOver(s);
+                    }
                     next.AddRange(found);
                 }
                 lock (_snapshotLock) { _snapshots = next; }
@@ -167,8 +173,8 @@ namespace HyzMouseHub
 
         /// <summary>
         /// 一只鼠标会同时暴露多个 HID 接口，路径里的设备实例又不总相同；按实例拆组后
-        /// 同一只鼠标会被当成两台（一台读得到、一台“休眠”）。这里按 VID:PID + 型号收口：
-        /// 只有一台能读到时合并成一台；两台都能读到才认定是同款双接收器，保留分开。
+        /// 同一只鼠标会被当成两台（一台读得到、一台“休眠”）。这里按 VID:PID + 类型收口：
+        /// 最多只有一台能读到时合并成一台；两台都能实读才认定是同款双接收器，保留分开。
         /// </summary>
         private static void CollapseMirroredDevices(List<DeviceSnapshot> found)
         {
@@ -178,7 +184,8 @@ namespace HyzMouseHub
                 new Dictionary<string, List<DeviceSnapshot>>(StringComparer.OrdinalIgnoreCase);
             foreach (DeviceSnapshot s in found)
             {
-                string key = s.Info.Provider + "|" + s.Info.VidPid + "|" + s.Info.Model + "|" + (int)s.Info.Kind;
+                // 型号名不参与分组：同一个硬件的不同接口，取到的产品名不一定完全一致。
+                string key = s.Info.Provider + "|" + s.Info.VidPid + "|" + (int)s.Info.Kind;
                 List<DeviceSnapshot> list;
                 if (!buckets.TryGetValue(key, out list))
                 {
@@ -193,8 +200,10 @@ namespace HyzMouseHub
                 List<DeviceSnapshot> group = bucket.Value;
                 if (group.Count < 2) continue;
 
+                // 只有本次真正读到的才算活；缓存读数不算，否则永远合并不掉。
                 int live = 0;
-                foreach (DeviceSnapshot s in group) if (s.Battery.Percent >= 0) live++;
+                foreach (DeviceSnapshot s in group)
+                    if (s.Battery.Percent >= 0 && !s.Battery.Cached) live++;
                 if (live >= 2) continue;
 
                 // 保留没有 # 后缀的那条：旧配置、勾选状态、托盘顺序都还指着原 ID。

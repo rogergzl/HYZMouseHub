@@ -19,6 +19,8 @@ namespace HyzMouseHub
         public static readonly Color Surface = Color.FromArgb(0xFF, 0xFF, 0xFF);
         public static readonly Color SurfaceBottom = Color.FromArgb(0xFB, 0xFC, 0xFE);
         public static readonly Color Border = Color.FromArgb(0xE2, 0xE7, 0xEE);
+        // 按钮 / 输入框描边比卡片描边稍深一点，才看得出是能点的控件。
+        public static readonly Color BorderStrong = Color.FromArgb(0xD3, 0xDA, 0xE4);
         // 卡片描边：一圈很细的近黑线，让悬浮卡片有明确边界。
         public static readonly Color BorderInk = Color.FromArgb(0x24, 0x29, 0x30);
         public static readonly Color Hairline = Color.FromArgb(0xEB, 0xEF, 0xF4);
@@ -33,7 +35,9 @@ namespace HyzMouseHub
         public static readonly Color AccentSoft = Color.FromArgb(0xEC, 0xF2, 0xFE);
         public static readonly Color Danger = Color.FromArgb(0xD9, 0x3B, 0x3B);
 
-        public static readonly Color FieldFill = Color.FromArgb(0xFA, 0xFB, 0xFD);
+        // 顶栏按钮底色：比白底深一档，才看得出是控件而不是标题的一部分。
+        public static readonly Color HeaderButton = Color.FromArgb(0xEC, 0xF0, 0xF7);
+        public static readonly Color FieldFill = Color.FromArgb(0xF7, 0xF9, 0xFC);
         public static readonly Color FieldHover = Color.FromArgb(0xF4, 0xF6, 0xFA);
         public static readonly Color FieldDown = Color.FromArgb(0xE8, 0xEC, 0xF3);
 
@@ -45,7 +49,8 @@ namespace HyzMouseHub
         public const int FieldRadius = 8;    // 输入控件圆角
         public const int HeaderHeight = 64;
         public const int StatusHeight = 30;
-        public const int RowHeight = 28;     // 行内控件统一高度
+        public const int RowHeight = 28;     // 行内控件统一高度（按钮）
+        public const int FieldHeight = 26;   // 输入控件统一高度（下拉 / 数字 / 文本）
         public const int RowGap = 10;
         public const int TitleHeight = 24;
         public const int TitleGap = 12;
@@ -93,19 +98,24 @@ namespace HyzMouseHub
             button.Height = RowHeight;
         }
 
-        /// <summary>顶栏动作按钮：无边框，只在 hover 时浮出底色，不抢标题。</summary>
-        public static void StyleGhost(Button button)
+        /// <summary>
+        /// 顶栏动作按钮：做成带底色的次级按钮，和白底顶栏拉开一层，看着就知道能点。
+        /// 比卡片里的描边按钮更轻，不抢标题。
+        /// </summary>
+        public static void StyleHeaderButton(Button button)
         {
             button.FlatStyle = FlatStyle.Flat;
             button.UseVisualStyleBackColor = false;
-            button.FlatAppearance.BorderSize = 0;
-            button.BackColor = Header;
-            button.ForeColor = TextSecondary;
-            button.FlatAppearance.MouseOverBackColor = FieldHover;
-            button.FlatAppearance.MouseDownBackColor = FieldDown;
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.BorderColor = BorderStrong;
+            button.BackColor = HeaderButton;
+            button.ForeColor = TextPrimary;
+            button.FlatAppearance.MouseOverBackColor = FieldDown;
+            button.FlatAppearance.MouseDownBackColor = AccentSoft;
             button.Font = Body;
             button.Cursor = Cursors.Hand;
-            button.Height = RowHeight;
+            button.TextAlign = ContentAlignment.MiddleCenter;
+            button.Height = FieldHeight;
         }
 
         /// <summary>下拉框 / 数字框共用的视觉参数。</summary>
@@ -113,6 +123,54 @@ namespace HyzMouseHub
         {
             field.Font = Body;
             field.ForeColor = TextPrimary;
+        }
+
+        /// <summary>
+        /// 下拉框：系统样式会给一个固定矮高度，和旁边的数字框、按钮对不齐，
+        /// 底边还常被吃掉一截。改成自绘固定行高 + 自己画一圈描边，
+        /// 高度和边框都由我们说了算，视觉上和数字框、按钮同一层次。
+        /// </summary>
+        public static void StyleCombo(ComboBox combo)
+        {
+            combo.DropDownStyle = ComboBoxStyle.DropDownList;
+            combo.FlatStyle = FlatStyle.Standard;
+            combo.BackColor = FieldFill;
+            combo.ForeColor = TextPrimary;
+            combo.Font = Body;
+            combo.DrawMode = DrawMode.OwnerDrawFixed;
+            combo.ItemHeight = FieldHeight - 6;
+            combo.DrawItem += DrawComboRow;
+            combo.Paint += DrawComboFrame;
+        }
+
+        /// <summary>FlatStyle 拉平后系统不再画外框，只在悬停时浮一层；这里补一圈实描边。</summary>
+        private static void DrawComboFrame(object sender, PaintEventArgs e)
+        {
+            ComboBox combo = sender as ComboBox;
+            if (combo == null) return;
+            Color ink = combo.Focused ? Accent : BorderStrong;
+            using (Pen pen = new Pen(ink))
+                e.Graphics.DrawRectangle(pen, 0, 0, combo.Width - 1, combo.Height - 1);
+        }
+
+        private static void DrawComboRow(object sender, DrawItemEventArgs e)
+        {
+            ComboBox combo = sender as ComboBox;
+            if (combo == null) return;
+
+            bool closed = (e.State & DrawItemState.ComboBoxEdit) == DrawItemState.ComboBoxEdit;
+            bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            Color back = closed ? FieldFill : (selected ? AccentSoft : Surface);
+            using (SolidBrush fill = new SolidBrush(back)) e.Graphics.FillRectangle(fill, e.Bounds);
+
+            string text = e.Index >= 0 && e.Index < combo.Items.Count
+                ? combo.GetItemText(combo.Items[e.Index])
+                : combo.Text;
+            Rectangle box = new Rectangle(e.Bounds.X + 7, e.Bounds.Y,
+                Math.Max(0, e.Bounds.Width - 12), e.Bounds.Height);
+            TextRenderer.DrawText(e.Graphics, text, combo.Font, box, TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
     }
 }

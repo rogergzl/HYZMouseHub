@@ -29,18 +29,34 @@ namespace HyzMouseHub
         private readonly Label _status = new Label();
         private readonly Label _version = new Label();
         private Panel _body;
-        private FlowLayoutPanel _left;
-        private FlowLayoutPanel _right;
+        private TableLayoutPanel _grid;
+        private Card[][] _rows;
 
         private bool _loading;
         private string _thresholdDeviceIds = "";
         private bool _aligning;
+
+        // 板载 DPI 的启动补读窗口：和开机快速扫描同一套规则（60 秒内每 5 秒一次，
+        // 读到就收尾）。设备刚开机时通常还在休眠，一次读不到就报“无法读取”太急。
+        private readonly StartupBurst _dpiBurst = new StartupBurst();
+        private System.Windows.Forms.Timer _dpiTimer;
+        private bool _dpiReading;
+        private bool _dpiKnown;
+        private string _dpiDeviceId = "";
 
         public SettingsForm(TrayApp app)
         {
             _app = app;
             _service = app.Service;
             _state = app.State;
+
+            // 左列放“这台设备”，右列放“怎么显示”，同一行的两张卡配成一对。
+            _rows = new Card[][]
+            {
+                new Card[] { _device, _trayDevices },
+                new Card[] { _profiles, _appearance },
+                new Card[] { _dpi, _volume }
+            };
 
             Text = "HYZ Mouse Hub";
             Icon = AppIcon.Shared;
@@ -96,10 +112,10 @@ namespace HyzMouseHub
 
             _about.Text = "关于";
             _diagnose.Text = "读取诊断";
-            Theme.StyleGhost(_about);
-            Theme.StyleGhost(_diagnose);
-            _about.Size = new Size(76, Theme.RowHeight);
-            _diagnose.Size = new Size(88, Theme.RowHeight);
+            Theme.StyleHeaderButton(_about);
+            Theme.StyleHeaderButton(_diagnose);
+            _about.Size = new Size(72, Theme.FieldHeight);
+            _diagnose.Size = new Size(88, Theme.FieldHeight);
             _about.Anchor = _diagnose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             header.Controls.Add(_about);
             header.Controls.Add(_diagnose);
@@ -133,50 +149,35 @@ namespace HyzMouseHub
                 AutoScroll = true
             };
 
-            TableLayoutPanel columns = new TableLayoutPanel
+            _grid = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
                 ColumnCount = 2,
-                RowCount = 1,
-                BackColor = Theme.Back
-            };
-            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-            _left = ColumnPanel(true);
-            _right = ColumnPanel(false);
-            columns.Controls.Add(_left, 0, 0);
-            columns.Controls.Add(_right, 1, 0);
-
-            // 左侧放“这台设备”：设备 → 配置 → 板载 DPI；
-            // 右侧放“怎么显示”：托盘 → 外观 → 音量。两列自然高度只差十几像素，
-            // 余量交给列表吸收，不会出现某张卡片被拉长后一片空白。
-            _left.Controls.Add(_device);
-            _left.Controls.Add(_profiles);
-            _left.Controls.Add(_dpi);
-
-            _right.Controls.Add(_trayDevices);
-            _right.Controls.Add(_appearance);
-            _right.Controls.Add(_volume);
-
-            body.Controls.Add(columns);
-            return body;
-        }
-
-        private static FlowLayoutPanel ColumnPanel(bool left)
-        {
-            return new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = false,
+                RowCount = _rows.Length,
                 BackColor = Theme.Back,
-                Padding = new Padding(0),
-                // 两列等宽、中间留 18px：外侧内边距与中间沟槽一致，视觉上左右对称。
-                Margin = left ? new Padding(0, 0, 9, 0) : new Padding(9, 0, 0, 0)
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
             };
+            _grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            _grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+
+            int half = Theme.Gutter / 2;
+            for (int row = 0; row < _rows.Length; row++)
+            {
+                _grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
+                for (int col = 0; col < 2; col++)
+                {
+                    Card card = _rows[row][col];
+                    card.Dock = DockStyle.Fill;
+                    // 中间沟槽左右各半；行间距只留给非最后一行，最后一张卡贴着底。
+                    card.Margin = new Padding(col == 0 ? 0 : half, 0,
+                        col == 0 ? half : 0, row == _rows.Length - 1 ? 0 : Theme.Gap);
+                    _grid.Controls.Add(card, col, row);
+                }
+            }
+
+            body.Controls.Add(_grid);
+            return body;
         }
 
         private Control BuildStatusBar()
@@ -208,109 +209,56 @@ namespace HyzMouseHub
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            if (_aligning || _left == null) return;
+            if (_aligning || _grid == null) return;
             _aligning = true;
-            try
-            {
-                SizeCards(_left);
-                SizeCards(_right);
-                AlignColumns();
-            }
-            finally
-            {
-                _aligning = false;
-            }
+            try { LayoutRows(); }
+            finally { _aligning = false; }
         }
 
-        private static void SizeCards(FlowLayoutPanel parent)
+        /// <summary>
+        /// 每一行的高度取两张卡里较高的那张，两列因此顶部对齐、底部也齐平；
+        /// 内容决定的高度不够填满窗口时，多出来的空间平均分给三行。
+        /// </summary>
+        private void LayoutRows()
         {
-            int width = parent.ClientSize.Width;
-            if (width < 240) return;
-            foreach (Control c in parent.Controls)
-                if (c is Card && c.Width != width) c.Width = width;
-        }
+            if (_grid == null || _rows == null || _grid.RowStyles.Count < _rows.Length) return;
 
-        /// <summary>两列高度不一致时，把差给可伸缩的卡片（列表类），而不是在卡片底部留白。</summary>
-        private void AlignColumns()
-        {
-            if (_left == null || _right == null) return;
-            // 每轮先把间距和高度复位，避免上一轮的拉伸累积成越来越大。
-            foreach (Control c in _left.Controls) { ResetCardHeight(c); c.Margin = new Padding(0, 0, 0, Theme.Gap); }
-            foreach (Control c in _right.Controls) { ResetCardHeight(c); c.Margin = new Padding(0, 0, 0, Theme.Gap); }
-
-            int leftHeight = StackHeight(_left);
-            int rightHeight = StackHeight(_right);
-            if (leftHeight <= 0 || rightHeight <= 0 || leftHeight == rightHeight) return;
-
-            FlowLayoutPanel shorter = leftHeight < rightHeight ? _left : _right;
-            int slack = Math.Abs(rightHeight - leftHeight);
-
-            // 先按列内间距均摊：卡片保持自然高度，只把间距拉松，底边自然齐平。
-            slack = DistributeGaps(shorter, slack);
-            if (slack <= 0) return;
-
-            int absorbed = 0;
-            foreach (Control c in shorter.Controls)
+            int[] natural = new int[_rows.Length];
+            int total = 0;
+            for (int i = 0; i < _rows.Length; i++)
             {
-                if (absorbed >= slack) break;
-                Card card = c as Card;
-                if (card != null) absorbed += card.AbsorbSlack(slack - absorbed);
+                natural[i] = Math.Max(_rows[i][0].NaturalHeight, _rows[i][1].NaturalHeight);
+                total += natural[i];
+                if (i < _rows.Length - 1) total += Theme.Gap;
             }
 
-            // 没有可伸缩的卡片时，退化为拉伸最后一张卡，至少保持两列底边齐平。
-            if (absorbed < slack)
+            int viewport = _body == null ? 0 : _body.ClientSize.Height - _body.Padding.Vertical;
+            int target = Math.Max(total, viewport);
+            int extra = Math.Max(0, target - total);
+            int share = _rows.Length > 0 ? extra / _rows.Length : 0;
+            int remainder = extra - share * _rows.Length;
+
+            if (_grid.Height != target) _grid.Height = target;
+            for (int i = 0; i < _rows.Length; i++)
             {
-                Card last = LastCard(shorter);
-                if (last != null) last.Height = last.Height + (slack - absorbed);
+                int height = natural[i] + share + (i == _rows.Length - 1 ? remainder : 0);
+                if (i < _rows.Length - 1) height += Theme.Gap;
+                if (Math.Abs(_grid.RowStyles[i].Height - height) > 0.5f)
+                    _grid.RowStyles[i].Height = height;
             }
         }
 
-        /// <summary>把高度差摊到列内卡片间距上（每张最多多 14px），返回没摊完的余量。</summary>
-        private static int DistributeGaps(FlowLayoutPanel column, int slack)
+        /// <summary>三行卡片按内容决定的总高度（不含被窗口拉高的部分）。</summary>
+        private int NaturalContentHeight()
         {
-            int cards = 0;
-            foreach (Control c in column.Controls) if (c.Visible) cards++;
-            if (cards == 0) return slack;
-
-            int per = Math.Min(14, slack / cards);
-            if (per <= 0) return slack;
-
-            int distributed = 0;
-            int i = 0;
-            foreach (Control c in column.Controls)
+            if (_rows == null) return 0;
+            int total = 0;
+            for (int i = 0; i < _rows.Length; i++)
             {
-                if (!c.Visible) continue;
-                int extra = i < slack - per * cards ? per + 1 : per;
-                c.Margin = new Padding(0, 0, 0, Theme.Gap + extra);
-                distributed += extra;
-                i++;
+                total += Math.Max(_rows[i][0].NaturalHeight, _rows[i][1].NaturalHeight);
+                if (i < _rows.Length - 1) total += Theme.Gap;
             }
-            return slack - distributed;
-        }
-
-        private static void ResetCardHeight(Control c)
-        {
-            Card card = c as Card;
-            if (card != null && card.Height != card.NaturalHeight) card.Height = card.NaturalHeight;
-        }
-
-        private static int StackHeight(FlowLayoutPanel panel)
-        {
-            int height = panel.Padding.Top;
-            foreach (Control c in panel.Controls)
-                if (c.Visible) height += c.Height + c.Margin.Vertical;
-            return height + panel.Padding.Bottom;
-        }
-
-        private static Card LastCard(FlowLayoutPanel panel)
-        {
-            Card last = null;
-            foreach (Control c in panel.Controls)
-            {
-                Card card = c as Card;
-                if (card != null && card.Visible) last = card;
-            }
-            return last;
+            return total;
         }
 
         protected override void OnShown(EventArgs e)
@@ -320,16 +268,16 @@ namespace HyzMouseHub
             FitHeightToContent();
         }
 
-        /// <summary>内容比窗口矮时收掉底部空白，让卡片贴着状态栏。</summary>
+        /// <summary>内容比窗口矮时收掉底部空白，让最后一行卡片贴着状态栏。</summary>
         private void FitHeightToContent()
         {
-            if (_left == null || _right == null || _body == null) return;
+            if (_body == null) return;
             if (_body.VerticalScroll.Visible) return;
 
-            int contentBottom = Math.Max(StackHeight(_left), StackHeight(_right));
-            if (contentBottom <= 0) return;
+            int content = NaturalContentHeight();
+            if (content <= 0) return;
 
-            int needed = Theme.HeaderHeight + _body.Padding.Vertical + contentBottom + Theme.StatusHeight;
+            int needed = Theme.HeaderHeight + _body.Padding.Vertical + content + Theme.StatusHeight;
             int slack = ClientSize.Height - needed;
             if (slack <= 8) return;
 
@@ -453,7 +401,16 @@ namespace HyzMouseHub
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) _state.Changed -= OnStateChanged;
+            if (disposing)
+            {
+                _state.Changed -= OnStateChanged;
+                StopDpiBurst();
+                if (_dpiTimer != null)
+                {
+                    _dpiTimer.Dispose();
+                    _dpiTimer = null;
+                }
+            }
             base.Dispose(disposing);
         }
 
@@ -501,6 +458,7 @@ namespace HyzMouseHub
             _volume.EndpointList.Items.Clear();
             foreach (VolumeService.Endpoint ep in endpoints) _volume.EndpointList.Items.Add(ep);
             _volume.SetAvailable(endpoints.Count > 0);
+            PerformLayout();
             if (endpoints.Count > 0)
             {
                 _volume.EndpointList.SelectedIndex = 0;
@@ -536,6 +494,8 @@ namespace HyzMouseHub
                 _profiles.NameBox.Text = "";
             }
             _profiles.SetEmptyState(_profiles.Profiles.Items.Count == 0);
+            // 有没有配置会改变卡片高度，行高要重算。
+            PerformLayout();
         }
 
         private void UpdateCurrentDpiText(string text)
@@ -601,7 +561,13 @@ namespace HyzMouseHub
             if (item == null) return;
             _state.SetSelectedDevice(item.Device.Id);
             UpdateDeviceLabels();
-            ReadDpi();
+            // 换设备才自动补读；同一个设备不重复读，避免每个刷新周期都去敲接口。
+            if (item.Device.Id != _dpiDeviceId)
+            {
+                _dpiDeviceId = item.Device.Id;
+                _dpiKnown = false;
+                BeginDpiBurst();
+            }
         }
 
         private void UpdateDeviceLabels()
@@ -637,27 +603,102 @@ namespace HyzMouseHub
 
         private void ReadDpi()
         {
+            StopDpiBurst();
+            ReadDpiCore(false);
+        }
+
+        /// <summary>启动补读：60 秒窗口内每 5 秒读一次，读到就收尾；手动点「读取」会提前结束。</summary>
+        private void BeginDpiBurst()
+        {
             DeviceInfo device = SelectedDevice();
-            if (device == null) { SetStatus("请先选择设备"); return; }
-            SetStatus("正在读取硬件 DPI...");
+            if (device == null) return;
+            if (!device.SupportsDpi)
+            {
+                UpdateCurrentDpiText("当前板载 DPI：该设备没有板载 DPI");
+                return;
+            }
+
+            _dpiBurst.Begin();
+            if (_dpiTimer == null)
+            {
+                _dpiTimer = new System.Windows.Forms.Timer();
+                _dpiTimer.Interval = StartupBurst.IntervalSeconds * 1000;
+                _dpiTimer.Tick += delegate { OnDpiBurstTick(); };
+            }
+            _dpiTimer.Start();
+            ReadDpiCore(true);
+        }
+
+        private void OnDpiBurstTick()
+        {
+            if (!_dpiBurst.IsActive())
+            {
+                StopDpiBurst();
+                DeviceInfo device = SelectedDevice();
+                // 已经在别的时机读到过就不再覆盖成失败，避免收尾那一下把好值刷掉。
+                if (!_dpiKnown && device != null && device.SupportsDpi && !_dpiReading)
+                    UpdateCurrentDpiText("当前板载 DPI：无法读取（设备休眠）");
+                return;
+            }
+            ReadDpiCore(true);
+        }
+
+        private void StopDpiBurst()
+        {
+            _dpiBurst.Stop();
+            if (_dpiTimer != null) _dpiTimer.Stop();
+        }
+
+        /// <param name="auto">补读触发的读取：失败时不急着报错，窗口内继续等下一轮。</param>
+        private void ReadDpiCore(bool auto)
+        {
+            DeviceInfo device = SelectedDevice();
+            if (device == null)
+            {
+                if (!auto) SetStatus("请先选择设备");
+                return;
+            }
+            if (!device.SupportsDpi)
+            {
+                StopDpiBurst();
+                UpdateCurrentDpiText("当前板载 DPI：该设备没有板载 DPI");
+                return;
+            }
+            if (_dpiReading) return;
+            _dpiReading = true;
+
+            if (!auto) SetStatus("正在读取硬件 DPI...");
+            else UpdateCurrentDpiText("当前板载 DPI：读取中…");
+
             ThreadPool.QueueUserWorkItem(delegate
             {
                 DpiReading r = _service.ReadDpi(device);
                 UiInvoke(delegate
                 {
+                    _dpiReading = false;
                     if (r.X > 0)
                     {
+                        _dpiKnown = true;
+                        StopDpiBurst();
                         _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, r.X));
                         _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, r.Y > 0 ? r.Y : r.X));
                         if (r.Stage > 0) _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, r.Stage));
                         UpdateCurrentDpiText("当前板载 DPI：" + r.X + " × " + (r.Y > 0 ? r.Y : r.X) +
                                              (r.Stage > 0 ? "（档 " + r.Stage + "）" : ""));
+                        SetStatus("硬件 DPI：" + r.Text);
+                    }
+                    else if (auto && _dpiBurst.IsActive())
+                    {
+                        // 设备刚上电多半还在休眠，窗口内继续等，不报失败。
+                        UpdateCurrentDpiText("当前板载 DPI：读取中…");
                     }
                     else
                     {
-                        UpdateCurrentDpiText("当前板载 DPI：无法读取（" + (string.IsNullOrEmpty(r.Text) ? "设备未响应" : r.Text) + "）");
+                        StopDpiBurst();
+                        UpdateCurrentDpiText("当前板载 DPI：无法读取（" +
+                                             (string.IsNullOrEmpty(r.Text) ? "设备未响应" : r.Text) + "）");
+                        SetStatus("硬件 DPI：" + r.Text);
                     }
-                    SetStatus("硬件 DPI：" + r.Text);
                 });
             });
         }
@@ -874,12 +915,10 @@ namespace HyzMouseHub
 
         private void ShowAbout()
         {
-            MessageBox.Show(this,
-                "HYZ Mouse Hub v" + AppVersion + "\r\n\r\n" +
-                "把无线外设的电量放到任务栏一眼可见，附带板载 DPI 与多套配置。\r\n" +
-                "单文件绿色程序，无遥测、不联网。\r\n\r\n" +
-                "github.com/rogergzl/HYZMouseHub",
-                "关于", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            using (AboutForm about = new AboutForm())
+            {
+                about.ShowDialog(this);
+            }
         }
 
         private void SaveSettings()

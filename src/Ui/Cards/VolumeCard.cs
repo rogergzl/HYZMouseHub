@@ -12,10 +12,9 @@ namespace HyzMouseHub
         public readonly Label Value = new Label();
         public readonly Label Empty = MutedLabel("未检测到耳机端点");
 
-        public VolumeCard() : base("耳机音量", Theme.RowHeight + Theme.RowGap + 34)
+        public VolumeCard() : base("耳机音量", Theme.FieldHeight + Theme.RowGap + 34)
         {
-            EndpointList.DropDownStyle = ComboBoxStyle.DropDownList;
-            Theme.StyleField(EndpointList);
+            Theme.StyleCombo(EndpointList);
             Content.Controls.Add(EndpointList);
 
             Level.Minimum = 0;
@@ -41,7 +40,7 @@ namespace HyzMouseHub
         /// <summary>没有端点时只留一行说明，卡片跟着变矮，不留空框。</summary>
         protected override int ContentHeight
         {
-            get { return _available ? base.ContentHeight : Theme.RowHeight; }
+            get { return _available ? base.ContentHeight : Theme.FieldHeight; }
         }
 
         public void SetAvailable(bool available)
@@ -49,23 +48,23 @@ namespace HyzMouseHub
             _available = available;
             EndpointList.Visible = Level.Visible = Value.Visible = available;
             Empty.Visible = !available;
-            Height = NaturalHeight;
-            PerformLayout();
         }
 
         protected override void LayoutContent()
         {
             int w = Content.Width;
-            CenterIn(EndpointList, 0, Theme.RowHeight);
+            CenterIn(EndpointList, 0, Theme.FieldHeight);
             EndpointList.SetBounds(0, EndpointList.Top, w, EndpointList.Height);
 
-            int top = Theme.RowHeight + Theme.RowGap;
+            int top = Theme.FieldHeight + Theme.RowGap;
             const int valueWidth = 52;
             CenterIn(Level, top, 34);
             Level.SetBounds(0, Level.Top, Math.Max(80, w - valueWidth - 12), Level.Height);
             Value.SetBounds(w - valueWidth, top, valueWidth, 34);
 
-            Empty.SetBounds(0, 0, w, Theme.RowHeight + Theme.RowGap + 8);
+            // 没有端点时说明行在内容区里垂直居中，卡片被拉高也不会只剩顶部一行字。
+            int emptyHeight = Math.Max(Theme.RowHeight, Content.Height);
+            Empty.SetBounds(0, 0, w, emptyHeight);
         }
     }
 }
