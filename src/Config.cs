@@ -189,13 +189,25 @@ namespace HyzMouseHub
             get { return Path.Combine(ConfigDir, "profiles.ini"); }
         }
 
+        /// <summary>把任意秒数归到界面上可选的三档（15 / 30 / 90），取最近的一档。</summary>
+        private static int NearestRefreshSeconds(int value)
+        {
+            int best = 15;
+            int gap = Math.Abs(value - 15);
+            if (Math.Abs(value - 30) < gap) { best = 30; gap = Math.Abs(value - 30); }
+            if (Math.Abs(value - 90) < gap) best = 90;
+            return best;
+        }
+
         public static AppConfig Load()
         {
             AppConfig c = new AppConfig();
             Dictionary<string, string> kv = ParseIni(SettingsPath);
             int v;
             if (int.TryParse(Get(kv, "DisplayMode"), out v)) c.DisplayMode = v == 1 ? 1 : 0;
-            if (int.TryParse(Get(kv, "RefreshSeconds"), out v) && v >= 5) c.RefreshSeconds = v;
+            // 刷新间隔在界面上只有 15 / 30 / 90 三档：手工改成别的值（如 7 秒）时按最近一档归位，
+            // 否则实际按 7 秒跑、界面却勾着 90 秒，两处显示对不上。
+            if (int.TryParse(Get(kv, "RefreshSeconds"), out v) && v >= 5) c.RefreshSeconds = NearestRefreshSeconds(v);
             if (int.TryParse(Get(kv, "LowThreshold"), out v) && v >= 0 && v <= 100) c.LowThreshold = v;
             if (int.TryParse(Get(kv, "SleepTimeoutMinutes"), out v) && v >= SleepTimeoutMin && v <= SleepTimeoutMax)
                 c.SleepTimeoutMinutes = v;
