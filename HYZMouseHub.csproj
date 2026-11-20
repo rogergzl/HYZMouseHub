@@ -25,14 +25,14 @@
     <Compile Include="src\LeobogProvider.cs" />
     <Compile Include="src\EposProvider.cs" />
     <Compile Include="src\VolumeService.cs" />
-    <Compile Include="src\UiComponents.cs" />
     <Compile Include="src\AppState.cs" />
     <Compile Include="src\StartupBurst.cs" />
     <Compile Include="src\Config.cs" />
     <Compile Include="src\DeviceService.cs" />
     <Compile Include="src\TrayApp.cs" />
-    <Compile Include="src\SettingsForm.cs" />
     <Compile Include="src\AssemblyInfo.cs" />
+    <!-- 界面层按模块分文件：令牌、卡片基类、每张卡片一个文件。新增模块不用改这里。 -->
+    <Compile Include="src\Ui\**\*.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />

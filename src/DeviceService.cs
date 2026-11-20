@@ -157,11 +157,73 @@ namespace HyzMouseHub
                             found.Add(s);
                         }
                     }
+                    CollapseMirroredDevices(found);
                     DisambiguateIds(found, provider);
                     next.AddRange(found);
                 }
                 lock (_snapshotLock) { _snapshots = next; }
             }
+        }
+
+        /// <summary>
+        /// 一只鼠标会同时暴露多个 HID 接口，路径里的设备实例又不总相同；按实例拆组后
+        /// 同一只鼠标会被当成两台（一台读得到、一台“休眠”）。这里按 VID:PID + 型号收口：
+        /// 只有一台能读到时合并成一台；两台都能读到才认定是同款双接收器，保留分开。
+        /// </summary>
+        private static void CollapseMirroredDevices(List<DeviceSnapshot> found)
+        {
+            if (found.Count < 2) return;
+
+            Dictionary<string, List<DeviceSnapshot>> buckets =
+                new Dictionary<string, List<DeviceSnapshot>>(StringComparer.OrdinalIgnoreCase);
+            foreach (DeviceSnapshot s in found)
+            {
+                string key = s.Info.Provider + "|" + s.Info.VidPid + "|" + s.Info.Model + "|" + (int)s.Info.Kind;
+                List<DeviceSnapshot> list;
+                if (!buckets.TryGetValue(key, out list))
+                {
+                    list = new List<DeviceSnapshot>();
+                    buckets.Add(key, list);
+                }
+                list.Add(s);
+            }
+
+            foreach (KeyValuePair<string, List<DeviceSnapshot>> bucket in buckets)
+            {
+                List<DeviceSnapshot> group = bucket.Value;
+                if (group.Count < 2) continue;
+
+                int live = 0;
+                foreach (DeviceSnapshot s in group) if (s.Battery.Percent >= 0) live++;
+                if (live >= 2) continue;
+
+                // 保留没有 # 后缀的那条：旧配置、勾选状态、托盘顺序都还指着原 ID。
+                DeviceSnapshot keep = group[0];
+                foreach (DeviceSnapshot s in group)
+                    if (s.Info.Id.IndexOf('#') < 0) { keep = s; break; }
+
+                DeviceSnapshot source = null;
+                foreach (DeviceSnapshot s in group)
+                    if (s.Battery.Percent >= 0) { source = s; break; }
+                if (source != null && source != keep) CopyReading(source, keep);
+
+                foreach (DeviceSnapshot s in group)
+                    if (s != keep) found.Remove(s);
+            }
+        }
+
+        private static void CopyReading(DeviceSnapshot from, DeviceSnapshot to)
+        {
+            to.Battery.Percent = from.Battery.Percent;
+            to.Battery.Charging = from.Battery.Charging;
+            to.Battery.Online = from.Battery.Online;
+            to.Battery.Millivolts = from.Battery.Millivolts;
+            to.Battery.Detail = from.Battery.Detail;
+            to.Battery.Error = from.Battery.Error;
+            to.Battery.Cached = from.Battery.Cached;
+            to.Battery.CachedAt = from.Battery.CachedAt;
+            to.Battery.HealthText = from.Battery.HealthText;
+            to.Battery.UpdatedAt = from.Battery.UpdatedAt;
         }
 
         /// <summary>

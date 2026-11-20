@@ -7,6 +7,10 @@ using System.Windows.Forms;
 
 namespace HyzMouseHub
 {
+    /// <summary>
+    /// 设置窗口。只做三件事：摆放卡片、把控件事件转成中间层调用、把中间层状态刷回控件。
+    /// 界面不持有任何业务状态，显示与保存都以 <see cref="AppState"/> 为准。
+    /// </summary>
     internal sealed class SettingsForm : Form
     {
         private readonly TrayApp _app;
@@ -19,15 +23,18 @@ namespace HyzMouseHub
         private readonly ProfileCard _profiles = new ProfileCard();
         private readonly AppearanceCard _appearance = new AppearanceCard();
         private readonly VolumeCard _volume = new VolumeCard();
-        private readonly SafetyCard _safety = new SafetyCard();
         private readonly DiagnosticsCard _diagnostics = new DiagnosticsCard();
         private readonly Button _about = new Button();
         private readonly Button _diagnose = new Button();
         private readonly Label _status = new Label();
+        private readonly Label _version = new Label();
         private Panel _body;
+        private FlowLayoutPanel _left;
+        private FlowLayoutPanel _right;
 
         private bool _loading;
         private string _thresholdDeviceIds = "";
+        private bool _aligning;
 
         public SettingsForm(TrayApp app)
         {
@@ -39,11 +46,12 @@ namespace HyzMouseHub
             Icon = AppIcon.Shared;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96F, 96F);
-            ClientSize = new Size(1040, 880);
-            MinimumSize = new Size(940, 700);
+            ClientSize = new Size(1020, 840);
+            MinimumSize = new Size(900, 640);
             StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(0xF3, 0xF6, 0xF9);
-            Font = new Font("Segoe UI", 9.5F);
+            BackColor = Theme.Back;
+            Font = Theme.Body;
+            DoubleBuffered = true;
             FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
                 if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
@@ -51,12 +59,377 @@ namespace HyzMouseHub
 
             BuildUi();
             WireEvents();
-            // 状态中间层是唯一权威来源：任何一处改了设置，这里同步控件，
-            // 不再依赖构造时读到的旧值。
             _state.Changed += OnStateChanged;
             LoadSettingsUi();
             RefreshDevices();
         }
+
+        // ── 布局 ───────────────────────────────────────────────────────────
+
+        private void BuildUi()
+        {
+            Control header = BuildHeader();
+            Controls.Add(header);
+            Controls.Add(_body = BuildBody());
+            Controls.Add(BuildStatusBar());
+
+            // WinForms 从 Controls 末尾开始停靠：Fill 必须第一个，Header 次之，状态栏最后。
+            Controls.SetChildIndex(_body, 0);
+            Controls.SetChildIndex(header, 1);
+            Controls.SetChildIndex(Controls[2], 2);
+        }
+
+        private Control BuildHeader()
+        {
+            Panel header = new Panel { Dock = DockStyle.Top, Height = Theme.HeaderHeight, BackColor = Theme.Header };
+
+            Label title = new Label
+            {
+                Text = "HYZ Mouse Hub",
+                Font = Theme.Title,
+                ForeColor = Theme.TextPrimary,
+                Location = new Point(Theme.Pad + 2, 0),
+                Size = new Size(320, Theme.HeaderHeight),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            header.Controls.Add(title);
+
+            _about.Text = "关于";
+            _diagnose.Text = "读取诊断";
+            Theme.StyleGhost(_about);
+            Theme.StyleGhost(_diagnose);
+            _about.Size = new Size(76, Theme.RowHeight);
+            _diagnose.Size = new Size(88, Theme.RowHeight);
+            _about.Anchor = _diagnose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            header.Controls.Add(_about);
+            header.Controls.Add(_diagnose);
+
+            // 宽度要等布局出来才知道，按右边缘算位置，窗口缩放时跟着走。
+            EventHandler place = delegate
+            {
+                _about.Location = new Point(header.ClientSize.Width - Theme.Pad - _about.Width,
+                    (Theme.HeaderHeight - _about.Height) / 2);
+                _diagnose.Location = new Point(_about.Left - 8 - _diagnose.Width, _about.Top);
+            };
+            header.Resize += place;
+            place(null, EventArgs.Empty);
+
+            header.Controls.Add(new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 1,
+                BackColor = Theme.Hairline
+            });
+            return header;
+        }
+
+        private Panel BuildBody()
+        {
+            Panel body = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(Theme.Pad, Theme.Pad, Theme.Pad, Theme.Pad),
+                BackColor = Theme.Back,
+                AutoScroll = true
+            };
+
+            TableLayoutPanel columns = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Theme.Back
+            };
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            _left = ColumnPanel(true);
+            _right = ColumnPanel(false);
+            columns.Controls.Add(_left, 0, 0);
+            columns.Controls.Add(_right, 1, 0);
+
+            // 左侧放“这台设备”：设备 → 配置 → 板载 DPI；
+            // 右侧放“怎么显示”：托盘 → 外观 → 音量。两列自然高度只差十几像素，
+            // 余量交给列表吸收，不会出现某张卡片被拉长后一片空白。
+            _left.Controls.Add(_device);
+            _left.Controls.Add(_profiles);
+            _left.Controls.Add(_dpi);
+
+            _right.Controls.Add(_trayDevices);
+            _right.Controls.Add(_appearance);
+            _right.Controls.Add(_volume);
+
+            body.Controls.Add(columns);
+            return body;
+        }
+
+        private static FlowLayoutPanel ColumnPanel(bool left)
+        {
+            return new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = false,
+                BackColor = Theme.Back,
+                Padding = new Padding(0),
+                // 两列等宽、中间留 18px：外侧内边距与中间沟槽一致，视觉上左右对称。
+                Margin = left ? new Padding(0, 0, 9, 0) : new Padding(9, 0, 0, 0)
+            };
+        }
+
+        private Control BuildStatusBar()
+        {
+            _status.Dock = DockStyle.Fill;
+            _status.BackColor = Theme.Header;
+            _status.ForeColor = Theme.TextMuted;
+            _status.Font = Theme.Small;
+            _status.Padding = new Padding(Theme.Pad, 0, 0, 0);
+            _status.TextAlign = ContentAlignment.MiddleLeft;
+            _status.Text = "就绪";
+
+            _version.Dock = DockStyle.Right;
+            _version.Width = 110;
+            _version.BackColor = Theme.Header;
+            _version.ForeColor = Theme.TextMuted;
+            _version.Font = Theme.Small;
+            _version.TextAlign = ContentAlignment.MiddleRight;
+            _version.Padding = new Padding(0, 0, Theme.Pad, 0);
+            _version.Text = "v" + typeof(Program).Assembly.GetName().Version.ToString(3);
+
+            Panel bar = new Panel { Dock = DockStyle.Bottom, Height = Theme.StatusHeight, BackColor = Theme.Header };
+            bar.Controls.Add(_status);
+            bar.Controls.Add(_version);
+            bar.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Theme.Hairline });
+            return bar;
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (_aligning || _left == null) return;
+            _aligning = true;
+            try
+            {
+                SizeCards(_left);
+                SizeCards(_right);
+                AlignColumns();
+            }
+            finally
+            {
+                _aligning = false;
+            }
+        }
+
+        private static void SizeCards(FlowLayoutPanel parent)
+        {
+            int width = parent.ClientSize.Width;
+            if (width < 240) return;
+            foreach (Control c in parent.Controls)
+                if (c is Card && c.Width != width) c.Width = width;
+        }
+
+        /// <summary>两列高度不一致时，把差给可伸缩的卡片（列表类），而不是在卡片底部留白。</summary>
+        private void AlignColumns()
+        {
+            if (_left == null || _right == null) return;
+            // 每轮先把间距和高度复位，避免上一轮的拉伸累积成越来越大。
+            foreach (Control c in _left.Controls) { ResetCardHeight(c); c.Margin = new Padding(0, 0, 0, Theme.Gap); }
+            foreach (Control c in _right.Controls) { ResetCardHeight(c); c.Margin = new Padding(0, 0, 0, Theme.Gap); }
+
+            int leftHeight = StackHeight(_left);
+            int rightHeight = StackHeight(_right);
+            if (leftHeight <= 0 || rightHeight <= 0 || leftHeight == rightHeight) return;
+
+            FlowLayoutPanel shorter = leftHeight < rightHeight ? _left : _right;
+            int slack = Math.Abs(rightHeight - leftHeight);
+
+            // 先按列内间距均摊：卡片保持自然高度，只把间距拉松，底边自然齐平。
+            slack = DistributeGaps(shorter, slack);
+            if (slack <= 0) return;
+
+            int absorbed = 0;
+            foreach (Control c in shorter.Controls)
+            {
+                if (absorbed >= slack) break;
+                Card card = c as Card;
+                if (card != null) absorbed += card.AbsorbSlack(slack - absorbed);
+            }
+
+            // 没有可伸缩的卡片时，退化为拉伸最后一张卡，至少保持两列底边齐平。
+            if (absorbed < slack)
+            {
+                Card last = LastCard(shorter);
+                if (last != null) last.Height = last.Height + (slack - absorbed);
+            }
+        }
+
+        /// <summary>把高度差摊到列内卡片间距上（每张最多多 14px），返回没摊完的余量。</summary>
+        private static int DistributeGaps(FlowLayoutPanel column, int slack)
+        {
+            int cards = 0;
+            foreach (Control c in column.Controls) if (c.Visible) cards++;
+            if (cards == 0) return slack;
+
+            int per = Math.Min(14, slack / cards);
+            if (per <= 0) return slack;
+
+            int distributed = 0;
+            int i = 0;
+            foreach (Control c in column.Controls)
+            {
+                if (!c.Visible) continue;
+                int extra = i < slack - per * cards ? per + 1 : per;
+                c.Margin = new Padding(0, 0, 0, Theme.Gap + extra);
+                distributed += extra;
+                i++;
+            }
+            return slack - distributed;
+        }
+
+        private static void ResetCardHeight(Control c)
+        {
+            Card card = c as Card;
+            if (card != null && card.Height != card.NaturalHeight) card.Height = card.NaturalHeight;
+        }
+
+        private static int StackHeight(FlowLayoutPanel panel)
+        {
+            int height = panel.Padding.Top;
+            foreach (Control c in panel.Controls)
+                if (c.Visible) height += c.Height + c.Margin.Vertical;
+            return height + panel.Padding.Bottom;
+        }
+
+        private static Card LastCard(FlowLayoutPanel panel)
+        {
+            Card last = null;
+            foreach (Control c in panel.Controls)
+            {
+                Card card = c as Card;
+                if (card != null && card.Visible) last = card;
+            }
+            return last;
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            SyncAppearanceControls();
+            FitHeightToContent();
+        }
+
+        /// <summary>内容比窗口矮时收掉底部空白，让卡片贴着状态栏。</summary>
+        private void FitHeightToContent()
+        {
+            if (_left == null || _right == null || _body == null) return;
+            if (_body.VerticalScroll.Visible) return;
+
+            int contentBottom = Math.Max(StackHeight(_left), StackHeight(_right));
+            if (contentBottom <= 0) return;
+
+            int needed = Theme.HeaderHeight + _body.Padding.Vertical + contentBottom + Theme.StatusHeight;
+            int slack = ClientSize.Height - needed;
+            if (slack <= 8) return;
+
+            int newClient = ClientSize.Height - slack;
+            if (Height - ClientSize.Height + newClient < MinimumSize.Height) return;
+            ClientSize = new Size(ClientSize.Width, newClient);
+        }
+
+        // ── 事件 ───────────────────────────────────────────────────────────
+
+        private void WireEvents()
+        {
+            _device.DeviceList.SelectedIndexChanged += delegate { OnDeviceSelected(); };
+            _trayDevices.DeviceList.ItemCheck += delegate(object sender, ItemCheckEventArgs e)
+            {
+                // 程序化填充列表时也会触发 ItemCheck；构造阶段句柄还没建好，直接 BeginInvoke 会抛。
+                if (_loading || !IsHandleCreated) return;
+                BeginInvoke(new Action(SaveTrayVisibility));
+            };
+            _dpi.Read.Click += delegate { ReadDpi(); };
+            _dpi.Write.Click += delegate { ApplyDpi(); };
+            _dpi.Rescan.Click += delegate { _app.RefreshNow(); };
+            _profiles.Profiles.SelectedIndexChanged += delegate
+            {
+                MouseProfile p = _profiles.Profiles.SelectedItem as MouseProfile;
+                if (p != null) _profiles.NameBox.Text = p.Name;
+            };
+            _profiles.Save.Click += delegate { SaveProfile(); };
+            _profiles.Apply.Click += delegate { ApplySelectedProfile(); };
+            _profiles.Rename.Click += delegate { RenameProfile(); };
+            _profiles.Delete.Click += delegate { DeleteProfile(); };
+            _profiles.Add.Click += delegate { AddProfile(); };
+            _appearance.Save.Click += delegate { SaveSettings(); };
+            _appearance.Close.Click += delegate { Hide(); };
+            _about.Click += delegate { ShowAbout(); };
+            _diagnose.Click += delegate { ShowDiagnostics(); };
+            _diagnostics.OpenLog.Click += delegate { OpenLogFolder(); };
+            _trayDevices.ThresholdDevice.SelectedIndexChanged += delegate { LoadThresholdForSelectedDevice(); };
+            _trayDevices.UseGlobal.CheckedChanged += delegate { SaveThresholdForSelectedDevice(); };
+            _trayDevices.Threshold.ValueChanged += delegate { SaveThresholdForSelectedDevice(); };
+
+            // 编辑中的折算预览：值还没保存，按控件现值算给用户看。
+            _appearance.Interval.SelectedIndexChanged += delegate { RefreshSleepPreview(); };
+            _appearance.SleepMinutes.ValueChanged += delegate { RefreshSleepPreview(); };
+
+            _volume.EndpointList.SelectedIndexChanged += delegate
+            {
+                if (_loading) return;
+                VolumeService.Endpoint ep = _volume.EndpointList.SelectedItem as VolumeService.Endpoint;
+                if (ep == null) return;
+                int v = VolumeService.GetVolume(ep.Id);
+                if (v >= 0) _volume.Level.Value = v;
+                UpdateVolumeLabel();
+            };
+            _volume.Level.ValueChanged += delegate
+            {
+                if (_loading) return;
+                VolumeService.Endpoint ep = _volume.EndpointList.SelectedItem as VolumeService.Endpoint;
+                if (ep == null) return;
+                if (VolumeService.SetVolume(ep.Id, _volume.Level.Value)) UpdateVolumeLabel();
+            };
+
+            // 键盘操作：Esc 关闭（等同隐藏），Tab 顺序按卡片视觉顺序。
+            KeyPreview = true;
+            KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape) { Hide(); e.Handled = true; }
+            };
+            ApplyTabOrder();
+        }
+
+        private void ApplyTabOrder()
+        {
+            Control[] order = { _device.DeviceList, _profiles.Profiles, _profiles.NameBox, _profiles.Save,
+                                _profiles.Apply, _profiles.Rename, _profiles.Delete, _profiles.Add,
+                                _volume.EndpointList, _volume.Level,
+                                _trayDevices.DeviceList, _trayDevices.ThresholdDevice, _trayDevices.Threshold,
+                                _trayDevices.UseGlobal,
+                                _appearance.NumberMode, _appearance.IconMode, _appearance.Interval,
+                                _appearance.LowThreshold, _appearance.SleepMinutes, _appearance.AutoStart,
+                                _appearance.ChargeFullAlert, _appearance.DisconnectAlert,
+                                _appearance.Save, _appearance.Close,
+                                _dpi.X, _dpi.Y, _dpi.Stage, _dpi.Read, _dpi.Write, _dpi.Rescan };
+            for (int i = 0; i < order.Length; i++) order[i].TabIndex = i;
+        }
+
+        private void RefreshSleepPreview()
+        {
+            if (_loading) return;
+            _appearance.RefreshSleepHint(
+                _appearance.Interval.SelectedIndex == 0 ? 15 : (_appearance.Interval.SelectedIndex == 1 ? 30 : 90),
+                (int)_appearance.SleepMinutes.Value);
+        }
+
+        private void UpdateVolumeLabel()
+        {
+            _volume.Value.Text = _volume.Level.Value + "%";
+        }
+
+        // ── 状态同步（全部以中间层为准） ─────────────────────────────────
 
         private void OnStateChanged(object sender, StateChangedEventArgs e)
         {
@@ -84,276 +457,6 @@ namespace HyzMouseHub
             base.Dispose(disposing);
         }
 
-        private void BuildUi()
-        {
-            Panel header = new Panel { Dock = DockStyle.Top, Height = 66, BackColor = Color.White };
-            Controls.Add(header);
-
-            Label title = new Label
-            {
-                Text = "HYZ Mouse Hub",
-                Font = new Font("Segoe UI Semibold", 17F, FontStyle.Bold),
-                ForeColor = Color.FromArgb(30, 30, 30),
-                Location = new Point(20, 8),
-                Size = new Size(280, 30)
-            };
-            header.Controls.Add(title);
-
-            Label subtitle = new Label
-            {
-                Text = "ATK / 雷蛇 / LEOBOG / EPOS 电量 · 板载 DPI · 多配置 · 多设备托盘",
-                Font = new Font("Segoe UI", 9.5F),
-                ForeColor = Color.FromArgb(110, 110, 110),
-                Location = new Point(21, 38),
-                Size = new Size(600, 22)
-            };
-            header.Controls.Add(subtitle);
-
-            _about.Text = "关于";
-            _about.Location = new Point(930, 18);
-            _about.Size = new Size(88, 30);
-            _about.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _about.FlatStyle = FlatStyle.Flat;
-            _about.FlatAppearance.BorderColor = Color.FromArgb(0xC8, 0xD4, 0xDE);
-            _about.BackColor = Color.White;
-            _about.Font = new Font("Segoe UI", 9.5F);
-            header.Controls.Add(_about);
-
-            _diagnose.Text = "读取诊断";
-            _diagnose.Location = new Point(834, 18);
-            _diagnose.Size = new Size(88, 30);
-            _diagnose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _diagnose.FlatStyle = FlatStyle.Flat;
-            _diagnose.FlatAppearance.BorderColor = Color.FromArgb(0xC8, 0xD4, 0xDE);
-            _diagnose.BackColor = Color.White;
-            _diagnose.Font = new Font("Segoe UI", 9.5F);
-            header.Controls.Add(_diagnose);
-
-            Panel headerLine = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 1,
-                BackColor = Color.FromArgb(0xE2, 0xE8, 0xEE)
-            };
-            header.Controls.Add(headerLine);
-
-            _body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 12), AutoScroll = true };
-            Panel body = _body;
-            Controls.Add(body);
-
-            TableLayoutPanel columns = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1
-            };
-            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            body.Controls.Add(columns);
-
-            FlowLayoutPanel left = ColumnPanel();
-            FlowLayoutPanel right = ColumnPanel();
-            columns.Controls.Add(left, 0, 0);
-            columns.Controls.Add(right, 1, 0);
-
-            left.Controls.Add(_device);
-            left.Controls.Add(_trayDevices);
-            left.Controls.Add(_dpi);
-            left.Controls.Add(_safety);
-
-            right.Controls.Add(_profiles);
-            right.Controls.Add(_appearance);
-            right.Controls.Add(_volume);
-
-            _status.Dock = DockStyle.Bottom;
-            _status.Height = 30;
-            _status.BackColor = Color.White;
-            _status.ForeColor = Color.FromArgb(80, 80, 80);
-            _status.Font = new Font("Segoe UI", 9.5F);
-            _status.Padding = new Padding(16, 6, 0, 0);
-            _status.Text = "就绪";
-            Controls.Add(_status);
-
-            // WinForms 从 Controls 末尾开始停靠：Fill 必须第一个，Header 其次，状态栏最后。
-            Controls.SetChildIndex(body, 0);
-            Controls.SetChildIndex(header, 1);
-            Controls.SetChildIndex(_status, 2);
-        }
-
-        private static FlowLayoutPanel ColumnPanel()
-        {
-            return new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = true,
-                Padding = new Padding(0, 0, 6, 0)
-            };
-        }
-
-        private bool _aligning;
-
-        protected override void OnLayout(LayoutEventArgs e)
-        {
-            base.OnLayout(e);
-            if (_aligning) return;
-            _aligning = true;
-            try
-            {
-                // 卡片宽度跟随所在列，内容始终完整可见，不依赖写死的窗口高度。
-                SizeCards(_device.Parent as FlowLayoutPanel);
-                SizeCards(_profiles.Parent as FlowLayoutPanel);
-                AlignColumns();
-            }
-            finally
-            {
-                _aligning = false;
-            }
-        }
-
-        /// <summary>两列高度不一致时，把较短一列的最后一张卡片拉伸到与另一列底部齐平。</summary>
-        private void AlignColumns()
-        {
-            FlowLayoutPanel left = _device.Parent as FlowLayoutPanel;
-            FlowLayoutPanel right = _profiles.Parent as FlowLayoutPanel;
-            if (left == null || right == null) return;
-
-            foreach (Control c in left.Controls) ResetCardHeight(c);
-            foreach (Control c in right.Controls) ResetCardHeight(c);
-
-            // 用高度累加而不是 c.Bottom：FlowLayoutPanel 的重新排布是延迟的，
-            // 刚改完高度时 Bottom 还是上一轮的值，按它算会得出错误的差值。
-            int lb = StackHeight(left);
-            int rb = StackHeight(right);
-            if (lb <= 0 || rb <= 0) return;
-            if (lb == rb) return;
-
-            FlowLayoutPanel shorter = lb < rb ? left : right;
-            int diff = Math.Abs(rb - lb);
-            Card last = LastCard(shorter);
-            if (last != null) last.Height = last.NaturalHeight + diff;
-        }
-
-        private static void ResetCardHeight(Control c)
-        {
-            Card card = c as Card;
-            if (card != null && card.Height != card.NaturalHeight) card.Height = card.NaturalHeight;
-        }
-
-        /// <summary>列内卡片按顺序堆叠后的总高度（含外边距），与实际渲染顺序一致。</summary>
-        private static int StackHeight(FlowLayoutPanel panel)
-        {
-            int height = panel.Padding.Top;
-            foreach (Control c in panel.Controls)
-                if (c.Visible) height += c.Height + c.Margin.Vertical;
-            return height + panel.Padding.Bottom;
-        }
-
-        private static Card LastCard(FlowLayoutPanel panel)
-        {
-            Card last = null;
-            foreach (Control c in panel.Controls)
-            {
-                Card card = c as Card;
-                if (card != null && card.Visible) last = card;
-            }
-            return last;
-        }
-
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            // 窗口可能是在托盘菜单改过设置之后才被打开，这里再对齐一次控件。
-            SyncAppearanceControls();
-            // 布局稳定后把窗口底部多余空白收掉，让卡片紧贴状态栏。
-            FitHeightToContent();
-        }
-
-        private void FitHeightToContent()
-        {
-            FlowLayoutPanel left = _device.Parent as FlowLayoutPanel;
-            FlowLayoutPanel right = _profiles.Parent as FlowLayoutPanel;
-            if (left == null || right == null || _body == null) return;
-            if (_body.VerticalScroll.Visible) return; // 内容已经超出，交给滚动
-
-            int cardsBottom = Math.Max(StackHeight(left), StackHeight(right));
-            if (cardsBottom <= 0) return;
-
-            // 末尾 6px 是卡片下边距 + 滚动条余量，避免收缩后反而出现滚动条。
-            int needed = _body.Top + _body.Padding.Top + cardsBottom + 16 + _body.Padding.Bottom + _status.Height;
-            int slack = ClientSize.Height - needed;
-            if (slack <= 10) return;
-
-            int newClient = ClientSize.Height - slack;
-            if (Height - ClientSize.Height + newClient < MinimumSize.Height) return;
-            ClientSize = new Size(ClientSize.Width, newClient);
-        }
-
-        private static void SizeCards(FlowLayoutPanel parent)
-        {
-            if (parent == null) return;
-            int width = parent.ClientSize.Width - 12;
-            if (width < 200) return;
-            foreach (Control c in parent.Controls)
-                if (c is Card && c.Width != width) c.Width = width;
-        }
-
-        private void WireEvents()
-        {
-            _device.DeviceList.SelectedIndexChanged += delegate { OnDeviceSelected(); };
-            _trayDevices.DeviceList.ItemCheck += delegate(object sender, ItemCheckEventArgs e)
-            {
-                // 程序化填充列表时也会触发 ItemCheck；构造函数阶段句柄还没建好，
-                // 直接 BeginInvoke 会抛 InvalidOperationException，所以必须双重保护。
-                if (_loading || !IsHandleCreated) return;
-                BeginInvoke(new Action(SaveTrayVisibility));
-            };
-            _dpi.Read.Click += delegate { ReadDpi(); };
-            _dpi.Write.Click += delegate { ApplyDpi(); };
-            _dpi.Rescan.Click += delegate { _app.RefreshNow(); };
-            _profiles.Profiles.SelectedIndexChanged += delegate
-            {
-                MouseProfile p = _profiles.Profiles.SelectedItem as MouseProfile;
-                if (p != null) _profiles.NameBox.Text = p.Name;
-            };
-            _profiles.Save.Click += delegate { SaveProfile(); };
-            _profiles.Apply.Click += delegate { ApplySelectedProfile(); };
-            _profiles.Rename.Click += delegate { RenameProfile(); };
-            _profiles.Delete.Click += delegate { DeleteProfile(); };
-            _profiles.Add.Click += delegate { AddProfile(); };
-            _appearance.Save.Click += delegate { SaveSettings(); };
-            _appearance.Close.Click += delegate { Hide(); };
-            _about.Click += delegate { ShowAbout(); };
-            _diagnose.Click += delegate { ShowDiagnostics(); };
-            _diagnostics.OpenLog.Click += delegate { OpenLogFolder(); };
-            _trayDevices.ThresholdDevice.SelectedIndexChanged += delegate { LoadThresholdForSelectedDevice(); };
-            _trayDevices.UseGlobal.CheckedChanged += delegate { SaveThresholdForSelectedDevice(); };
-            _trayDevices.Threshold.ValueChanged += delegate { SaveThresholdForSelectedDevice(); };
-
-            _volume.EndpointList.SelectedIndexChanged += delegate
-            {
-                if (_loading) return;
-                VolumeService.Endpoint ep = _volume.EndpointList.SelectedItem as VolumeService.Endpoint;
-                if (ep == null) return;
-                int v = VolumeService.GetVolume(ep.Id);
-                if (v >= 0) _volume.Level.Value = v;
-                UpdateVolumeLabel();
-            };
-            _volume.Level.ValueChanged += delegate
-            {
-                if (_loading) return;
-                VolumeService.Endpoint ep = _volume.EndpointList.SelectedItem as VolumeService.Endpoint;
-                if (ep == null) return;
-                if (VolumeService.SetVolume(ep.Id, _volume.Level.Value)) UpdateVolumeLabel();
-            };
-        }
-
-        private void UpdateVolumeLabel()
-        {
-            _volume.Value.Text = _volume.Level.Value + "%";
-        }
-
         private void LoadSettingsUi()
         {
             _loading = true;
@@ -366,7 +469,7 @@ namespace HyzMouseHub
             finally { _loading = false; }
         }
 
-        /// <summary>把外观设置控件重新对齐到中间层状态（不写回，只读取）。</summary>
+        /// <summary>把外观控件重新对齐到中间层状态（只读回写控件，不反向写状态）。</summary>
         private void SyncAppearanceControls()
         {
             if (IsDisposed) return;
@@ -379,10 +482,10 @@ namespace HyzMouseHub
                 _appearance.Interval.SelectedIndex = _state.RefreshSeconds == 15 ? 0 : (_state.RefreshSeconds == 30 ? 1 : 2);
                 _appearance.LowThreshold.Value = Clamp(_appearance.LowThreshold, _state.LowThreshold);
                 _appearance.SleepMinutes.Value = Clamp(_appearance.SleepMinutes, _state.SleepTimeoutMinutes);
-                _appearance.RefreshSleepHint();
                 _appearance.ChargeFullAlert.Checked = _state.ChargeFullAlert;
                 _appearance.DisconnectAlert.Checked = _state.DisconnectAlert;
                 _appearance.AutoStart.Checked = AppConfig.IsAutoStartEnabled();
+                _appearance.RefreshSleepHint(_state.RefreshSeconds, _state.SleepTimeoutMinutes);
             }
             finally { _loading = wasLoading; }
         }
@@ -421,7 +524,6 @@ namespace HyzMouseHub
                     if (p != null && p.Name == active) { pick = i; break; }
                 }
             }
-            // 没有“当前配置”时默认选中第一条，避免名称框一片空白。
             if (pick < 0 && _profiles.Profiles.Items.Count > 0) pick = 0;
             if (pick >= 0)
             {
@@ -433,7 +535,6 @@ namespace HyzMouseHub
             {
                 _profiles.NameBox.Text = "";
             }
-            // 列表为空时不显示占位行，改为提示“先读取再保存”。
             _profiles.SetEmptyState(_profiles.Profiles.Items.Count == 0);
         }
 
@@ -467,6 +568,8 @@ namespace HyzMouseHub
                 ReloadThresholdDevices();
                 RefreshDiagnostics();
                 UpdateDeviceLabels();
+                // 列表行数变了，卡片高度跟着变：重新走一遍列对齐。
+                PerformLayout();
             }
             finally
             {
@@ -507,28 +610,14 @@ namespace HyzMouseHub
             if (item == null)
             {
                 _device.Model.Text = "未检测到设备";
-                _device.Battery.Text = "电量 --";
-                _device.Sensor.Text = "传感器 --";
-                _device.Health.Text = "电池健康：硬件不支持 SoH / 循环次数";
-                _dpi.Status.Text = "插入 ATK / 雷蛇 2.4G 接收器后重试。";
-                UpdateCurrentDpiText("当前板载 DPI：--（未检测到设备）");
+                _device.Battery.Text = "--";
+                _device.Sensor.Text = "--";
+                UpdateCurrentDpiText("当前板载 DPI：--");
                 return;
             }
-            _device.Model.Text = TypeName(item.Device.Kind) + " · " + item.Device.DisplayName + " · " + item.Device.VidPid;
-            _device.Battery.Text = "电量 " + item.BatteryText + (item.Device.SupportsDpi ? "" : " · 不支持 DPI");
-            _device.Sensor.Text = string.IsNullOrEmpty(item.Device.Sensor) ? "传感器 -- · " + item.Device.DpiNote : "传感器 " + item.Device.Sensor;
-            DeviceSnapshot snap = FindSnapshot(item.Device.Id);
-            _device.Health.Text = snap != null && !string.IsNullOrEmpty(snap.Battery.HealthText)
-                ? "电池健康：" + snap.Battery.HealthText
-                : "电池健康：硬件不支持 SoH / 循环次数";
-            _dpi.Status.Text = item.Device.DpiNote;
-        }
-
-        private DeviceSnapshot FindSnapshot(string deviceId)
-        {
-            foreach (DeviceSnapshot s in _service.Snapshot())
-                if (string.Equals(s.Info.Id, deviceId, StringComparison.OrdinalIgnoreCase)) return s;
-            return null;
+            _device.Model.Text = TypeName(item.Device.Kind) + " · " + item.Device.DisplayName;
+            _device.Battery.Text = item.BatteryText + (item.Device.SupportsDpi ? "" : " · 无 DPI");
+            _device.Sensor.Text = string.IsNullOrEmpty(item.Device.Sensor) ? "--" : item.Device.Sensor;
         }
 
         private static string TypeName(DeviceKind kind)
@@ -543,6 +632,8 @@ namespace HyzMouseHub
             DeviceItem item = _device.DeviceList.SelectedItem as DeviceItem;
             return item == null ? null : item.Device;
         }
+
+        // ── DPI ───────────────────────────────────────────────────────────
 
         private void ReadDpi()
         {
@@ -580,14 +671,15 @@ namespace HyzMouseHub
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool ok = _service.WriteDpi(device, x, y, stage);
-                UiInvoke(delegate { SetStatus(ok ? "写入成功并已回读确认" : "写入失败：设备休眠 / 型号未识别 / 被占用"); });
+                UiInvoke(delegate { SetStatus(ok ? "写入成功并已回读确认" : "写入失败：休眠 / 型号未识别 / 被占用"); });
             });
         }
+
+        // ── 配置档位 ─────────────────────────────────────────────────────
 
         private void SaveProfile()
         {
             string name = _profiles.NameBox.Text.Trim();
-            // 未填名称时用当前板载 DPI 命名，避免因空名无法保存。
             if (string.IsNullOrEmpty(name)) name = _dpi.X.Value + " DPI";
             MouseProfile p = _state.FindProfile(name);
             bool isNew = p == null;
@@ -651,11 +743,13 @@ namespace HyzMouseHub
             SetStatus("已新建配置");
         }
 
+        // ── 阈值 ─────────────────────────────────────────────────────────
+
         private sealed class ThresholdDeviceItem
         {
             public readonly DeviceInfo Device;
             public ThresholdDeviceItem(DeviceInfo device) { Device = device; }
-            public override string ToString() { return Device.DisplayName + " · " + Device.VidPid; }
+            public override string ToString() { return Device.DisplayName; }
         }
 
         /// <summary>设备列表没变化时不重建下拉框，避免定时刷新打断正在编辑的阈值。</summary>
@@ -723,9 +817,11 @@ namespace HyzMouseHub
                 : (int)_trayDevices.Threshold.Value;
             _state.SetLowThresholdOverride(item.Device.Id, value);
             SetStatus(_trayDevices.UseGlobal.Checked
-                ? item.Device.DisplayName + " 的低电量阈值已跟随全局"
-                : item.Device.DisplayName + " 的低电量阈值设为 " + value + "%");
+                ? item.Device.DisplayName + "：跟随全局"
+                : item.Device.DisplayName + "：" + value + "%");
         }
+
+        // ── 诊断 / 关于 ──────────────────────────────────────────────────
 
         private void RefreshDiagnostics()
         {
@@ -736,23 +832,20 @@ namespace HyzMouseHub
                 : string.Join(Environment.NewLine, errors.ToArray());
         }
 
-        /// <summary>
-        /// 诊断卡片平时不占主界面版面——两张卡片叠下去整个窗口就要滚动，
-        /// 而这条信息绝大多数时候是空的。改成点「读取诊断」按需弹出。
-        /// </summary>
         private void ShowDiagnostics()
         {
             RefreshDiagnostics();
             using (Form dialog = new Form())
             {
                 dialog.Text = "读取诊断";
-                dialog.ClientSize = new Size(560, _diagnostics.NaturalHeight + 24);
+                dialog.ClientSize = new Size(600, _diagnostics.NaturalHeight + 40);
                 dialog.StartPosition = FormStartPosition.CenterParent;
                 dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dialog.MinimizeBox = false;
                 dialog.MaximizeBox = false;
                 dialog.ShowInTaskbar = false;
-                dialog.BackColor = Color.White;
+                dialog.BackColor = Theme.Back;
+                dialog.Padding = new Padding(Theme.Pad);
 
                 // 同一个控件只能有一个父容器：弹窗期间挂过来，关掉再摘掉。
                 _diagnostics.Dock = DockStyle.Fill;
@@ -783,10 +876,10 @@ namespace HyzMouseHub
         {
             MessageBox.Show(this,
                 "HYZ Mouse Hub v" + AppVersion + "\r\n\r\n" +
-                "轻量托盘电量角标显示器：把无线外设的电量放到任务栏一眼可见，\r\n" +
-                "附带板载 DPI 读写与多套配置。单文件绿色程序，无遥测、不联网。\r\n\r\n" +
-                "开源地址：github.com/rogergzl/HYZMouseHub",
-                "关于 HYZ Mouse Hub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "把无线外设的电量放到任务栏一眼可见，附带板载 DPI 与多套配置。\r\n" +
+                "单文件绿色程序，无遥测、不联网。\r\n\r\n" +
+                "github.com/rogergzl/HYZMouseHub",
+                "关于", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void SaveSettings()
@@ -801,7 +894,7 @@ namespace HyzMouseHub
                 _appearance.DisconnectAlert.Checked);
             _app.ResetRefreshClock();
             SetStatus(autostartOk ? "设置已保存"
-                : "设置已保存，但开机自启失败：" + (AppConfig.LastAutoStartError ?? "原因未知"));
+                : "设置已保存，开机自启失败：" + (AppConfig.LastAutoStartError ?? "原因未知"));
         }
 
         private void SetStatus(string text)
