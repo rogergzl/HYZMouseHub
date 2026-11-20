@@ -80,6 +80,7 @@ namespace HyzMouseHub
         private readonly Dictionary<string, string> _knownDeviceNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private bool _presenceInitialized;
         private bool? _lastDarkTray;
+        private bool _dpiProbing;
 
         public TrayApp(DeviceService service, AppState state, bool startMinimized, bool singleInstanceListener = true)
         {
@@ -104,6 +105,8 @@ namespace HyzMouseHub
             _timer.Start();
 
             if (singleInstanceListener) StartShowListener();
+            // 启动 / 自启动即开板载补读窗口：首轮扫描出设备后马上读，读到就定下来。
+            _state.BeginDpiWindow();
             RefreshNow();
             UpdateUi();
 
@@ -203,6 +206,9 @@ namespace HyzMouseHub
             }
 
             _secondsSinceRefresh++;
+            // 板载补读窗口内（启动后 1 分钟）按 5 秒节奏重试；到期或读到后本调用自然空转。
+            if (_state.DpiWindowActive) ProbeDpi();
+
             // 间隔统一向中间层取：开机自启后的快速扫描期它是 5 秒，
             // 读到活动设备或窗口到期后自动回到设置值，这里无需分支。
             int interval = Math.Max(StartupBurst.IntervalSeconds, _state.EffectiveRefreshSeconds);
@@ -254,6 +260,7 @@ namespace HyzMouseHub
                     _state.ReportScan(_service.Snapshot());
                     UpdateUi();
                     if (_settings != null) _settings.RefreshDevices();
+                    ProbeDpi();
                 });
             });
         }
@@ -347,6 +354,9 @@ namespace HyzMouseHub
         {
             UiInvoke(delegate
             {
+                // 打开窗口时再给一次补读机会：自启动后设备可能一直睡着，
+                // 等用户真的来看时把它叫醒读一次。已经读到过的设备不会再读。
+                _state.BeginDpiWindow();
                 if (_settings == null || _settings.IsDisposed)
                 {
                     _settings = new SettingsForm(this);
@@ -354,6 +364,41 @@ namespace HyzMouseHub
                 _settings.RefreshDevices();
                 _settings.Show();
                 _settings.BringToFront();
+                ProbeDpi();
+            });
+        }
+
+        /// <summary>
+        /// 启动 / 自启动后补读板载 DPI：每台支持板载的设备各试一次，5 秒一个周期、最多 1 分钟，
+        /// 读到即落盘（此后不再自动读）。设备刚上电多半还在休眠，读不到不算失败，下一轮再试；
+        /// 读不到时界面继续显示上次存下的值，绝不把已有值换成「休眠」。
+        /// </summary>
+        internal void ProbeDpi()
+        {
+            if (_dpiProbing) return;
+            List<DeviceInfo> due = new List<DeviceInfo>();
+            foreach (DeviceSnapshot s in _service.Snapshot())
+            {
+                if (s.Info == null || !s.Info.SupportsDpi) continue;
+                if (!_state.DpiProbeDue(s.Info.Id)) continue;
+                due.Add(s.Info);
+            }
+            if (due.Count == 0) return;
+
+            _dpiProbing = true;
+            foreach (DeviceInfo device in due) _state.MarkDpiProbe(device.Id);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    foreach (DeviceInfo device in due)
+                    {
+                        DpiReading r = _service.ReadDpi(device);
+                        if (r != null && r.X > 0) _state.RememberDpi(device.Id, r.X, r.Y, r.Stage);
+                    }
+                }
+                catch { }
+                finally { _dpiProbing = false; }
             });
         }
 
@@ -406,6 +451,16 @@ namespace HyzMouseHub
                 {
                     about.DrawToBitmap(bmp, new Rectangle(0, 0, about.Width, about.Height));
                     bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                // 滚到底再存一张：段落重叠的毛病只在滚动后才显形，必须滚过才算验到。
+                about.ScrollBodyToEnd();
+                Console.WriteLine(about.DumpBlocks());
+                string bottom = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path),
+                    System.IO.Path.GetFileNameWithoutExtension(path) + "-bottom.png");
+                using (Bitmap bmp = new Bitmap(about.Width, about.Height))
+                {
+                    about.DrawToBitmap(bmp, new Rectangle(0, 0, about.Width, about.Height));
+                    bmp.Save(bottom, System.Drawing.Imaging.ImageFormat.Png);
                 }
                 about.Close();
             }

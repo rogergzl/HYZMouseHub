@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Text;
 using System.Windows.Forms;
 
 namespace HyzMouseHub
@@ -52,7 +53,9 @@ namespace HyzMouseHub
                 "板载 DPI 与配置",
                 "「板载 DPI」读的是鼠标硬件里存的档位，不是系统指针速度；写入后会立刻回读确认，回读不一致即算失败。" +
                 "常用档位可以「保存为配置」，之后一键应用。设备休眠、型号未识别或被原厂软件占用时只读不写，" +
-                "避免写坏设备里的配置。"
+                "避免写坏设备里的配置。\r\n读到的档位会记下来：只有程序启动 / 自启动时、手动点「读取硬件 DPI」、" +
+                "手动写入、以及重启程序四种情况会更新它。设备休眠只是这一次没应答，界面上继续显示上次读到的档位，" +
+                "不会变成未知，也不会每隔几分钟去敲一次接口。"
             },
             new[]
             {
@@ -75,7 +78,7 @@ namespace HyzMouseHub
             }
         };
 
-        private readonly Panel _body = new Panel();
+        private readonly FlowLayoutPanel _body = new FlowLayoutPanel();
         private readonly List<Control> _blocks = new List<Control>();
         private int _builtWidth = -1;
 
@@ -145,6 +148,10 @@ namespace HyzMouseHub
             _body.Dock = DockStyle.Fill;
             _body.BackColor = Theme.Back;
             _body.AutoScroll = true;
+            // 用流式布局而不是绝对坐标：面板滚动时 WinForms 会平移子控件，
+            // 若再拿控件 Top 去推算下一段的位置，算出来的 y 会越来越小，段落就叠到标题上。
+            _body.FlowDirection = FlowDirection.TopDown;
+            _body.WrapContents = false;
             _body.Padding = new Padding(Theme.Pad + 6, Theme.Pad + 2, Theme.Pad + 6, Theme.Pad);
             return _body;
         }
@@ -190,8 +197,10 @@ namespace HyzMouseHub
 
         private int ContentWidth()
         {
-            int width = _body.ClientSize.Width - _body.Padding.Horizontal;
-            if (_body.VerticalScroll.Visible) width -= SystemInformation.VerticalScrollBarWidth;
+            // 内容一定超过一屏，滚动条常驻，所以宽度里固定扣掉滚动条宽度，
+            // 面板的 ClientSize 不会因为滚动条出现而变化，也就不会来回重建。
+            int width = _body.ClientSize.Width - _body.Padding.Horizontal
+                        - SystemInformation.VerticalScrollBarWidth;
             return Math.Max(200, width);
         }
 
@@ -201,40 +210,85 @@ namespace HyzMouseHub
             if (width <= 0 || width == _builtWidth) return;
             _builtWidth = width;
 
-            foreach (Control block in _blocks) block.Dispose();
-            _blocks.Clear();
-
-            int y = 0;
-            int left = _body.Padding.Left;
-            foreach (string[] section in Sections)
+            _body.SuspendLayout();
+            try
             {
-                Label title = new Label
-                {
-                    Text = section[0],
-                    Font = Theme.BodyStrong,
-                    ForeColor = Theme.TextPrimary,
-                    AutoSize = true,
-                    MaximumSize = new Size(width, 0),
-                    Location = new Point(left, y)
-                };
-                Label text = new Label
-                {
-                    Text = section[1],
-                    Font = Theme.Body,
-                    ForeColor = Theme.TextSecondary,
-                    AutoSize = true,
-                    MaximumSize = new Size(width, 0),
-                    Location = new Point(left, y + title.PreferredHeight + 4)
-                };
+                _body.AutoScrollPosition = new Point(0, 0);
+                _body.AutoScrollMinSize = Size.Empty;
 
-                _body.Controls.Add(title);
-                _body.Controls.Add(text);
-                _blocks.Add(title);
-                _blocks.Add(text);
+                foreach (Control block in _blocks) block.Dispose();
+                _blocks.Clear();
 
-                y = text.Top + text.PreferredHeight + 20;
+                foreach (string[] section in Sections)
+                {
+                    Label title = new Label
+                    {
+                        Text = section[0],
+                        Font = Theme.BodyStrong,
+                        ForeColor = Theme.TextPrimary,
+                        AutoSize = true,
+                        MaximumSize = new Size(width, 0),
+                        Location = new Point(0, 0)
+                    };
+                    Label text = new Label
+                    {
+                        Text = section[1],
+                        Font = Theme.Body,
+                        ForeColor = Theme.TextSecondary,
+                        AutoSize = true,
+                        MaximumSize = new Size(width, 0),
+                        Location = new Point(0, title.PreferredHeight + 4)
+                    };
+
+                    // 每段装进一个固定高度的容器，由流式布局依次排下去。
+                    // 高度只由两个标签的 PreferredHeight 决定，与滚动位置无关。
+                    Panel block = new Panel
+                    {
+                        Width = width,
+                        Height = title.PreferredHeight + 4 + text.PreferredHeight,
+                        Margin = new Padding(0, 0, 0, 18),
+                        BackColor = Theme.Back
+                    };
+                    block.Controls.Add(title);
+                    block.Controls.Add(text);
+
+                    _body.Controls.Add(block);
+                    _blocks.Add(block);
+                }
+
+                // 流式布局自己算的滚动范围会漏掉最后一段的下边距，滚到底仍被裁掉一行。
+                // 注意别在 SuspendLayout 期间读控件的 Bottom——那时子控件还没排布，
+                // 读到的是默认值；这里按我们自己设的高度累加，才是真实内容高度。
+                int stack = 0;
+                foreach (Control block in _body.Controls) stack += block.Height + block.Margin.Bottom;
+                _body.AutoScrollMinSize = new Size(0, stack + _body.Padding.Vertical);
             }
-            _body.AutoScrollMinSize = new Size(0, y);
+            finally
+            {
+                _body.ResumeLayout();
+            }
+        }
+
+        /// <summary>诊断用：滚到底，检查段落有没有被滚动位置带歪。</summary>
+        internal void ScrollBodyToEnd()
+        {
+            _body.AutoScrollPosition = new Point(0, Math.Max(1, _body.VerticalScroll.Maximum));
+            _body.PerformLayout();
+            Application.DoEvents();
+        }
+
+        /// <summary>诊断用：按顺序打印每段的位置，相邻两段有重叠即说明排版算错了。</summary>
+        internal string DumpBlocks()
+        {
+            StringBuilder sb = new StringBuilder();
+            int previousBottom = int.MinValue;
+            foreach (Control c in _body.Controls)
+            {
+                string flag = previousBottom > c.Top ? "  <== 重叠" : "";
+                sb.AppendLine("block top=" + c.Top + " bottom=" + c.Bottom + " h=" + c.Height + flag);
+                previousBottom = c.Bottom;
+            }
+            return sb.ToString();
         }
     }
 }

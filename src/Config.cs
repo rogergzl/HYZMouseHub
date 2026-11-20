@@ -40,6 +40,21 @@ namespace HyzMouseHub
         }
     }
 
+    /// <summary>一次读到的板载 DPI。板载值是硬件里存的档位，读到一次就一直算数。</summary>
+    public sealed class DpiSnapshot
+    {
+        public int X;
+        public int Y;
+        public int Stage;
+
+        public bool IsValid { get { return X > 0; } }
+
+        public string Text
+        {
+            get { return X + " × " + (Y > 0 ? Y : X) + (Stage > 0 ? "（档 " + Stage + "）" : ""); }
+        }
+    }
+
     public sealed class AppConfig
     {
         public const int SleepTimeoutMin = 1;
@@ -64,6 +79,31 @@ namespace HyzMouseHub
         public bool ChargeFullAlert = true;
         public bool DisconnectAlert = true;
         public List<MouseProfile> Profiles = new List<MouseProfile>();
+
+        /// <summary>
+        /// 每台设备最后一次读到的板载 DPI。板载数值不受休眠影响：
+        /// 只有启动读取、手动读取、手动写入会更新它，休眠、刷新、读写失败都不会清掉。
+        /// </summary>
+        public readonly Dictionary<string, DpiSnapshot> LastDpi =
+            new Dictionary<string, DpiSnapshot>(StringComparer.OrdinalIgnoreCase);
+
+        public DpiSnapshot CachedDpi(string deviceId)
+        {
+            DpiSnapshot value;
+            if (!string.IsNullOrEmpty(deviceId) && LastDpi.TryGetValue(deviceId, out value) && value.IsValid)
+                return value;
+            return null;
+        }
+
+        public void SetCachedDpi(string deviceId, int x, int y, int stage)
+        {
+            if (string.IsNullOrEmpty(deviceId) || x <= 0) return;
+            DpiSnapshot s = new DpiSnapshot();
+            s.X = x;
+            s.Y = y > 0 ? y : x;
+            s.Stage = Math.Max(0, stage);
+            LastDpi[deviceId] = s;
+        }
 
         /// <summary>最近一次 SetAutoStart 的失败原因，成功为 null。</summary>
         public static string LastAutoStartError { get; private set; }
@@ -166,6 +206,7 @@ namespace HyzMouseHub
             c.TrayVisibleIds = Get(kv, "TrayVisibleIds");
             c.TrayOrder = Get(kv, "TrayOrder");
             c.LoadThresholdOverrides(Get(kv, "LowThresholds"));
+            c.LoadLastDpi(Get(kv, "LastDpi"));
 
             if (!File.Exists(ProfilesPath))
             {
@@ -227,6 +268,37 @@ namespace HyzMouseHub
             return string.Join(";", parts.ToArray());
         }
 
+        /// <summary>格式：设备ID|x|y|档位，多条用分号隔开。设备 ID 里没有竖线。</summary>
+        private void LoadLastDpi(string encoded)
+        {
+            if (string.IsNullOrEmpty(encoded)) return;
+            foreach (string part in encoded.Split(';'))
+            {
+                if (string.IsNullOrEmpty(part)) continue;
+                string[] fields = part.Split('|');
+                if (fields.Length < 4) continue;
+                string id = fields[0].Trim();
+                if (id.Length == 0) continue;
+                int x, y, stage;
+                if (!int.TryParse(fields[1], out x) || x <= 0) continue;
+                if (!int.TryParse(fields[2], out y) || y <= 0) y = x;
+                if (!int.TryParse(fields[3], out stage) || stage < 0) stage = 0;
+                DpiSnapshot s = new DpiSnapshot();
+                s.X = x;
+                s.Y = y;
+                s.Stage = stage;
+                LastDpi[id] = s;
+            }
+        }
+
+        private string EncodeLastDpi()
+        {
+            List<string> parts = new List<string>();
+            foreach (KeyValuePair<string, DpiSnapshot> kv in LastDpi)
+                parts.Add(kv.Key + "|" + kv.Value.X + "|" + kv.Value.Y + "|" + kv.Value.Stage);
+            return string.Join(";", parts.ToArray());
+        }
+
         public void Save()
         {
             Dictionary<string, string> kv = new Dictionary<string, string>();
@@ -237,6 +309,7 @@ namespace HyzMouseHub
             kv["ChargeFullAlert"] = ChargeFullAlert.ToString();
             kv["DisconnectAlert"] = DisconnectAlert.ToString();
             kv["LowThresholds"] = EncodeThresholdOverrides();
+            kv["LastDpi"] = EncodeLastDpi();
             kv["SelectedDeviceId"] = SelectedDeviceId;
             kv["ActiveProfile"] = ActiveProfile;
             kv["TrayVisibleIds"] = TrayVisibleIds;

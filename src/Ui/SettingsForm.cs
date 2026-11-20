@@ -36,12 +36,9 @@ namespace HyzMouseHub
         private string _thresholdDeviceIds = "";
         private bool _aligning;
 
-        // 板载 DPI 的启动补读窗口：和开机快速扫描同一套规则（60 秒内每 5 秒一次，
-        // 读到就收尾）。设备刚开机时通常还在休眠，一次读不到就报“无法读取”太急。
-        private readonly StartupBurst _dpiBurst = new StartupBurst();
-        private System.Windows.Forms.Timer _dpiTimer;
+        // 板载 DPI 的显示一律以中间层缓存为准：这里没有「休眠」这种中间态，
+        // 只区分「读到过」和「还没读到过」。自动补读由托盘侧按启动规则驱动。
         private bool _dpiReading;
-        private bool _dpiKnown;
         private string _dpiDeviceId = "";
 
         public SettingsForm(TrayApp app)
@@ -397,6 +394,10 @@ namespace HyzMouseHub
                     finally { _loading = wasLoading; }
                 });
             }
+            else if (e.Area == StateArea.Dpi)
+            {
+                UiInvoke(ShowCachedDpi);
+            }
         }
 
         protected override void Dispose(bool disposing)
@@ -404,12 +405,6 @@ namespace HyzMouseHub
             if (disposing)
             {
                 _state.Changed -= OnStateChanged;
-                StopDpiBurst();
-                if (_dpiTimer != null)
-                {
-                    _dpiTimer.Dispose();
-                    _dpiTimer = null;
-                }
             }
             base.Dispose(disposing);
         }
@@ -561,12 +556,12 @@ namespace HyzMouseHub
             if (item == null) return;
             _state.SetSelectedDevice(item.Device.Id);
             UpdateDeviceLabels();
-            // 换设备才自动补读；同一个设备不重复读，避免每个刷新周期都去敲接口。
+            // 换设备才补读；同一台设备不重复读，避免每个刷新周期都去敲接口。
             if (item.Device.Id != _dpiDeviceId)
             {
                 _dpiDeviceId = item.Device.Id;
-                _dpiKnown = false;
-                BeginDpiBurst();
+                ShowCachedDpi();
+                _app.ProbeDpi();
             }
         }
 
@@ -584,6 +579,7 @@ namespace HyzMouseHub
             _device.Model.Text = TypeName(item.Device.Kind) + " · " + item.Device.DisplayName;
             _device.Battery.Text = item.BatteryText + (item.Device.SupportsDpi ? "" : " · 无 DPI");
             _device.Sensor.Text = string.IsNullOrEmpty(item.Device.Sensor) ? "--" : item.Device.Sensor;
+            ShowCachedDpi();
         }
 
         private static string TypeName(DeviceKind kind)
@@ -601,74 +597,52 @@ namespace HyzMouseHub
 
         // ── DPI ───────────────────────────────────────────────────────────
 
-        private void ReadDpi()
-        {
-            StopDpiBurst();
-            ReadDpiCore(false);
-        }
-
-        /// <summary>启动补读：60 秒窗口内每 5 秒读一次，读到就收尾；手动点「读取」会提前结束。</summary>
-        private void BeginDpiBurst()
-        {
-            DeviceInfo device = SelectedDevice();
-            if (device == null) return;
-            if (!device.SupportsDpi)
-            {
-                UpdateCurrentDpiText("当前板载 DPI：该设备没有板载 DPI");
-                return;
-            }
-
-            _dpiBurst.Begin();
-            if (_dpiTimer == null)
-            {
-                _dpiTimer = new System.Windows.Forms.Timer();
-                _dpiTimer.Interval = StartupBurst.IntervalSeconds * 1000;
-                _dpiTimer.Tick += delegate { OnDpiBurstTick(); };
-            }
-            _dpiTimer.Start();
-            ReadDpiCore(true);
-        }
-
-        private void OnDpiBurstTick()
-        {
-            if (!_dpiBurst.IsActive())
-            {
-                StopDpiBurst();
-                DeviceInfo device = SelectedDevice();
-                // 已经在别的时机读到过就不再覆盖成失败，避免收尾那一下把好值刷掉。
-                if (!_dpiKnown && device != null && device.SupportsDpi && !_dpiReading)
-                    UpdateCurrentDpiText("当前板载 DPI：无法读取（设备休眠）");
-                return;
-            }
-            ReadDpiCore(true);
-        }
-
-        private void StopDpiBurst()
-        {
-            _dpiBurst.Stop();
-            if (_dpiTimer != null) _dpiTimer.Stop();
-        }
-
-        /// <param name="auto">补读触发的读取：失败时不急着报错，窗口内继续等下一轮。</param>
-        private void ReadDpiCore(bool auto)
+        /// <summary>
+        /// 显示中间层里存下的板载值。板载是硬件里的档位，读到一次就一直显示：
+        /// 只有启动 / 自启动补读、手动读取、手动写入、重启程序会改它，休眠不会。
+        /// </summary>
+        private void ShowCachedDpi()
         {
             DeviceInfo device = SelectedDevice();
             if (device == null)
             {
-                if (!auto) SetStatus("请先选择设备");
+                UpdateCurrentDpiText("当前板载 DPI：--");
                 return;
             }
             if (!device.SupportsDpi)
             {
-                StopDpiBurst();
                 UpdateCurrentDpiText("当前板载 DPI：该设备没有板载 DPI");
                 return;
             }
+
+            DpiSnapshot cached = _state.CachedDpi(device.Id);
+            if (cached != null)
+            {
+                ApplyDpiToUi(cached);
+                UpdateCurrentDpiText("当前板载 DPI：" + cached.Text);
+                return;
+            }
+            UpdateCurrentDpiText(_state.DpiWindowActive ? "当前板载 DPI：读取中…" : "当前板载 DPI：--");
+        }
+
+        private void ApplyDpiToUi(DpiSnapshot s)
+        {
+            if (s == null || !s.IsValid) return;
+            _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, s.X));
+            _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, s.Y > 0 ? s.Y : s.X));
+            if (s.Stage > 0)
+                _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, s.Stage));
+        }
+
+        /// <summary>手动「读取硬件 DPI」：不管缓存里有没有值都去敲一次接口。</summary>
+        private void ReadDpi()
+        {
+            DeviceInfo device = SelectedDevice();
+            if (device == null) { SetStatus("请先选择设备"); return; }
+            if (!device.SupportsDpi) { SetStatus("该设备没有板载 DPI"); return; }
             if (_dpiReading) return;
             _dpiReading = true;
-
-            if (!auto) SetStatus("正在读取硬件 DPI...");
-            else UpdateCurrentDpiText("当前板载 DPI：读取中…");
+            SetStatus("正在读取硬件 DPI...");
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -678,27 +652,14 @@ namespace HyzMouseHub
                     _dpiReading = false;
                     if (r.X > 0)
                     {
-                        _dpiKnown = true;
-                        StopDpiBurst();
-                        _dpi.X.Value = Math.Min(_dpi.X.Maximum, Math.Max(_dpi.X.Minimum, r.X));
-                        _dpi.Y.Value = Math.Min(_dpi.Y.Maximum, Math.Max(_dpi.Y.Minimum, r.Y > 0 ? r.Y : r.X));
-                        if (r.Stage > 0) _dpi.Stage.Value = Math.Min(_dpi.Stage.Maximum, Math.Max(_dpi.Stage.Minimum, r.Stage));
-                        UpdateCurrentDpiText("当前板载 DPI：" + r.X + " × " + (r.Y > 0 ? r.Y : r.X) +
-                                             (r.Stage > 0 ? "（档 " + r.Stage + "）" : ""));
+                        _state.RememberDpi(device.Id, r.X, r.Y, r.Stage);
+                        ShowCachedDpi();
                         SetStatus("硬件 DPI：" + r.Text);
+                        return;
                     }
-                    else if (auto && _dpiBurst.IsActive())
-                    {
-                        // 设备刚上电多半还在休眠，窗口内继续等，不报失败。
-                        UpdateCurrentDpiText("当前板载 DPI：读取中…");
-                    }
-                    else
-                    {
-                        StopDpiBurst();
-                        UpdateCurrentDpiText("当前板载 DPI：无法读取（" +
-                                             (string.IsNullOrEmpty(r.Text) ? "设备未响应" : r.Text) + "）");
-                        SetStatus("硬件 DPI：" + r.Text);
-                    }
+                    // 读失败不动已显示的板载值：休眠只是这一次没应答，不代表板载值变了。
+                    SetStatus("读取失败：" + (string.IsNullOrEmpty(r.Text) ? "设备未响应" : r.Text));
+                    ShowCachedDpi();
                 });
             });
         }
@@ -712,7 +673,16 @@ namespace HyzMouseHub
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool ok = _service.WriteDpi(device, x, y, stage);
-                UiInvoke(delegate { SetStatus(ok ? "写入成功并已回读确认" : "写入失败：休眠 / 型号未识别 / 被占用"); });
+                UiInvoke(delegate
+                {
+                    if (ok)
+                    {
+                        // 写入成功即视为新的板载值：手动修改是允许改板载值的四个时机之一。
+                        _state.RememberDpi(device.Id, x, y, stage);
+                        ShowCachedDpi();
+                    }
+                    SetStatus(ok ? "写入成功并已回读确认" : "写入失败：休眠 / 型号未识别 / 被占用");
+                });
             });
         }
 

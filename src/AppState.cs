@@ -9,7 +9,8 @@ namespace HyzMouseHub
         Appearance,
         TrayDevices,
         Selection,
-        Profiles
+        Profiles,
+        Dpi
     }
 
     internal sealed class StateChangedEventArgs : EventArgs
@@ -135,6 +136,68 @@ namespace HyzMouseHub
         public void ReportScan(IList<DeviceSnapshot> snapshots)
         {
             _startupBurst.Observe(snapshots);
+        }
+
+        // ---------------- 板载 DPI ----------------
+
+        // 启动补读窗口的截止时间；窗口内每 5 秒最多读一次（规则同开机快速扫描）。
+        private DateTime _dpiWindowEnd;
+        // 本次运行已经读到过板载值的设备：读到即止，整次运行不再自动读。
+        private readonly HashSet<string> _dpiResolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, DateTime> _dpiLastAttempt =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// 最后一次读到的板载 DPI，跨重启保留。板载是硬件里存的档位，读到一次就一直算数：
+        /// 休眠、刷新、读写失败都不会把它清掉，界面上永远显示这一份。
+        /// </summary>
+        public DpiSnapshot CachedDpi(string deviceId)
+        {
+            return _config.CachedDpi(deviceId);
+        }
+
+        /// <summary>只有真的读到才更新；值没变就不重复落盘。</summary>
+        public void RememberDpi(string deviceId, int x, int y, int stage)
+        {
+            if (string.IsNullOrEmpty(deviceId) || x <= 0) return;
+            int ny = y > 0 ? y : x;
+            int ns = Math.Max(0, stage);
+            _dpiResolved.Add(deviceId);
+            DpiSnapshot old = _config.CachedDpi(deviceId);
+            if (old != null && old.X == x && old.Y == ny && old.Stage == ns) return;
+            _config.SetCachedDpi(deviceId, x, ny, ns);
+            _config.Save();
+            Raise(StateArea.Dpi);
+        }
+
+        /// <summary>开一个 1 分钟的补读窗口：程序启动、自启动、以及每次打开设置窗口时调用。</summary>
+        public void BeginDpiWindow()
+        {
+            DateTime end = DateTime.Now.AddSeconds(StartupBurst.WindowSeconds);
+            if (end > _dpiWindowEnd) _dpiWindowEnd = end;
+        }
+
+        /// <summary>补读窗口是否还开着（界面上据此决定显示「读取中…」还是 --）。</summary>
+        public bool DpiWindowActive { get { return DateTime.Now <= _dpiWindowEnd; } }
+
+        /// <summary>
+        /// 这台设备现在该不该读板载 DPI：本次运行还没读到、窗口没到期、距上次尝试过了 5 秒。
+        /// 已读到的不再读，所以休眠、换窗口都不会把值刷掉。
+        /// </summary>
+        public bool DpiProbeDue(string deviceId)
+        {
+            if (string.IsNullOrEmpty(deviceId)) return false;
+            if (_dpiResolved.Contains(deviceId)) return false;
+            if (!DpiWindowActive) return false;
+            DateTime last;
+            if (_dpiLastAttempt.TryGetValue(deviceId, out last) &&
+                (DateTime.Now - last).TotalSeconds < StartupBurst.IntervalSeconds) return false;
+            return true;
+        }
+
+        public void MarkDpiProbe(string deviceId)
+        {
+            if (!string.IsNullOrEmpty(deviceId)) _dpiLastAttempt[deviceId] = DateTime.Now;
         }
 
         // ---------------- 托盘显示 ----------------
