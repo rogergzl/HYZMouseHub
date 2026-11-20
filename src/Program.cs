@@ -56,6 +56,16 @@ namespace HyzMouseHub
                     PrintWatch(gap < 1 ? 1 : gap);
                     return 0;
                 }
+                if (first == "--burst" || first.StartsWith("--burst="))
+                {
+                    // 语法 --burst[=秒[:blind]]；blind 表示不看设备结果，用来看 5 秒节奏与窗口到期。
+                    int span = StartupBurst.WindowSeconds + 2;
+                    bool blind = first.IndexOf(":blind", StringComparison.OrdinalIgnoreCase) > 0;
+                    string value = first.Replace(":blind", "").Replace(":BLIND", "");
+                    if (value.Length > 8) int.TryParse(value.Substring(8), out span);
+                    PrintBurst(span < 5 ? 5 : span, blind);
+                    return 0;
+                }
                 if (first.StartsWith("--dpi="))
                 {
                     return SetDpiFromArgs(first.Substring(6));
@@ -88,12 +98,17 @@ namespace HyzMouseHub
             DeviceService service = new DeviceService(state);
 
             bool autostart = false;
+            bool bootStart = false;
             string snapshotPath = null;
             string iconPreviewPath = null;
             foreach (string arg in args)
             {
-                if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(arg, "--minimized", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase))
+                {
+                    autostart = true;
+                    bootStart = true;
+                }
+                else if (string.Equals(arg, "--minimized", StringComparison.OrdinalIgnoreCase))
                 {
                     autostart = true;
                 }
@@ -151,6 +166,10 @@ namespace HyzMouseHub
                 return 0;
             }
 
+            // 开机自启：先开快速扫描窗口（前 60 秒每 5 秒一次），
+            // 手动静默启动和诊断截图不走这条路径。
+            if (bootStart) state.BeginStartupScan();
+
             Application.Run(new TrayApp(service, state, autostart));
             return 0;
         }
@@ -176,7 +195,7 @@ namespace HyzMouseHub
 
         private static void PrintHelp()
         {
-            Console.WriteLine("HYZ Mouse Hub 0.3.3");
+            Console.WriteLine("HYZ Mouse Hub " + typeof(Program).Assembly.GetName().Version.ToString(3));
             Console.WriteLine();
             Console.WriteLine("无参数          启动托盘并弹出设置窗口");
             Console.WriteLine("--autostart     开机自启：静默最小化到托盘");
@@ -185,6 +204,7 @@ namespace HyzMouseHub
             Console.WriteLine("--test          扫描 ATK / 雷蛇设备并读取电量");
             Console.WriteLine("--test-all      同时读取 DPI（会唤醒设备）");
             Console.WriteLine("--watch[=秒]    连续刷新 8 次，观察休眠保留窗口（默认间隔 3 秒）");
+            Console.WriteLine("--burst[=秒[:blind]]  模拟开机自启，逐秒打印生效间隔；blind 忽略设备结果");
             Console.WriteLine("--dpi=ID,X,Y,STAGE  写入 DPI，例如 --dpi=RAZER:1532:00C1,1600,1600,1");
             Console.WriteLine("--probe=VID:PID  导出指定 HID 接口的特征/输入报告（协议适配用）");
             Console.WriteLine("--make-icon=路径  生成多尺寸程序图标 .ico");
@@ -227,6 +247,58 @@ namespace HyzMouseHub
                     Console.WriteLine("  DPI : {0}  传感器: {1}", d.Text, string.IsNullOrEmpty(s.Info.Sensor) ? s.Info.DpiNote : s.Info.Sensor);
                 }
             }
+        }
+
+        /// <summary>
+        /// 诊断用：模拟开机自启后的快速扫描窗口，逐秒打印当前生效间隔。
+        /// 设备在线时会在首个活动读数处提前结束，否则跑满窗口再回到设置间隔。
+        /// </summary>
+        private static void PrintBurst(int spanSeconds, bool blind)
+        {
+            AppState state = new AppState(AppConfig.Load());
+            DeviceService service = new DeviceService(state);
+            state.BeginStartupScan();
+            Console.WriteLine("模拟开机自启：前 " + StartupBurst.WindowSeconds + " 秒按 "
+                + StartupBurst.IntervalSeconds + " 秒扫描，否则回到设置间隔 "
+                + state.RefreshSeconds + " 秒。共观察 " + spanSeconds + " 秒。"
+                + (blind ? "（blind：忽略设备结果，仅验证节奏与到期）" : ""));
+
+            int elapsed = 0;
+            int nextScan = 0;
+            string lastResult = "未扫描";
+            while (elapsed < spanSeconds)
+            {
+                if (elapsed >= nextScan)
+                {
+                    service.Refresh();
+                    if (!blind) state.ReportScan(service.Snapshot());
+                    nextScan = elapsed + Math.Max(StartupBurst.IntervalSeconds, state.EffectiveRefreshSeconds);
+                    List<DeviceSnapshot> now = service.Snapshot();
+                    lastResult = now.Count == 0 ? "未检测到设备" : DescribeDevices(now);
+                }
+                Console.WriteLine("t={0,3}s  生效间隔={1,2}s  {2}  {3}",
+                    elapsed,
+                    state.EffectiveRefreshSeconds,
+                    state.StartupScanActive ? "快速扫描中（剩 " + state.StartupScanRemainingSeconds + "s）" : "已恢复设置间隔",
+                    lastResult);
+                Thread.Sleep(1000);
+                elapsed++;
+            }
+        }
+
+        private static string DescribeDevices(List<DeviceSnapshot> snapshots)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (DeviceSnapshot s in snapshots)
+            {
+                if (sb.Length > 0) sb.Append(" / ");
+                sb.Append(s.Info.ShortName);
+                sb.Append(' ');
+                sb.Append(s.Battery.Percent < 0 ? "--" : s.Battery.Percent + "%");
+                sb.Append(s.Battery.Online ? " 在线" : " 离线");
+                if (s.Battery.Cached) sb.Append(" 缓存");
+            }
+            return sb.ToString();
         }
 
         /// <summary>

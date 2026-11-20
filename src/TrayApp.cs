@@ -169,7 +169,10 @@ namespace HyzMouseHub
             }
 
             _secondsSinceRefresh++;
-            if (_secondsSinceRefresh >= Math.Max(5, _state.RefreshSeconds))
+            // 间隔统一向中间层取：开机自启后的快速扫描期它是 5 秒，
+            // 读到活动设备或窗口到期后自动回到设置值，这里无需分支。
+            int interval = Math.Max(StartupBurst.IntervalSeconds, _state.EffectiveRefreshSeconds);
+            if (_secondsSinceRefresh >= interval)
             {
                 _secondsSinceRefresh = 0;
                 RefreshNow();
@@ -213,6 +216,8 @@ namespace HyzMouseHub
                 UiInvoke(delegate
                 {
                     _refreshing = false;
+                    // 结果先回传中间层：快速扫描期内读到活动设备会就此收尾。
+                    _state.ReportScan(_service.Snapshot());
                     UpdateUi();
                     if (_settings != null) _settings.RefreshDevices();
                 });

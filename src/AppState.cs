@@ -26,6 +26,7 @@ namespace HyzMouseHub
     internal sealed class AppState
     {
         private readonly AppConfig _config;
+        private readonly StartupBurst _startupBurst = new StartupBurst();
 
         public AppState(AppConfig config)
         {
@@ -87,6 +88,32 @@ namespace HyzMouseHub
             _config.SleepTimeoutMinutes = sleepMinutes;
             _config.Save();
             Raise(StateArea.Appearance);
+        }
+
+        // ---------------- 启动快速扫描 ----------------
+
+        /// <summary>开机自启后 1 分钟内固定 5 秒扫描一次；读到活动设备或到期即恢复设置间隔。</summary>
+        public bool StartupScanActive { get { return _startupBurst.IsActive(); } }
+
+        /// <summary>当前生效的刷新间隔：快速扫描期间固定 5 秒，其余时间用设置值。</summary>
+        public int EffectiveRefreshSeconds
+        {
+            get { return _startupBurst.IsActive() ? StartupBurst.IntervalSeconds : _config.RefreshSeconds; }
+        }
+
+        /// <summary>快速扫描窗口剩余秒数，仅供诊断输出。</summary>
+        public int StartupScanRemainingSeconds { get { return _startupBurst.RemainingSeconds(); } }
+
+        /// <summary>仅由开机自启路径调用，标记快速扫描窗口开始。</summary>
+        public void BeginStartupScan()
+        {
+            _startupBurst.Begin();
+        }
+
+        /// <summary>每轮扫描结束后回传结果，由窗口自行判断是否提前结束。</summary>
+        public void ReportScan(IList<DeviceSnapshot> snapshots)
+        {
+            _startupBurst.Observe(snapshots);
         }
 
         // ---------------- 托盘显示 ----------------
